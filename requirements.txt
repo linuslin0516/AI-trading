@@ -1,5 +1,5 @@
 # Discord (Self-Bot)
-discord.py-self==2.0.0
+discord.py-self==2.1.0
 
 # Binance
 python-binance==1.0.19
