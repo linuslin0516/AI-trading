@@ -1,0 +1,131 @@
+# ========================================
+# AI 自動交易系統配置文件
+# ========================================
+# API Keys 從 .env 環境變數讀取，不要寫在這裡
+
+# Discord 設定
+discord:
+  monitored_channels:
+    - id: "1384381529064476815"
+      name: "大鏢客"
+      analyst: "大鏢客"
+      initial_weight: 1.0
+
+    - id: "1237749772148801567"
+      name: "三馬哥合約"
+      analyst: "三馬哥"
+      initial_weight: 1.0
+
+    - id: "1229967087301033994"
+      name: "幣圈所長課堂"
+      analyst: "所長"
+      initial_weight: 1.0
+
+    - id: "1104301561892585543"
+      name: "舒琴"
+      analyst: "舒琴"
+      initial_weight: 1.0
+
+    - id: "1113105418663776316"
+      name: "VIVI 比特幣分析"
+      analyst: "VIVI-BTC"
+      initial_weight: 1.0
+
+    - id: "1179304542345642024"
+      name: "VIVI 乙太幣"
+      analyst: "VIVI-ETH"
+      initial_weight: 1.0
+
+
+# Claude AI 設定
+claude:
+  model: "claude-sonnet-4-20250514"
+  max_tokens: 4096
+  temperature: 0.7
+
+# Binance 設定
+binance:
+  testnet: true
+  symbols:
+    - "BTCUSDT"
+    - "ETHUSDT"
+
+# Telegram 設定（API Keys 從 .env 讀取）
+telegram: {}
+
+# 分析觸發條件
+trigger:
+  # 收到訊息後等待 60 秒，收集同時段其他分析師的訊息，然後一起送 AI 分析
+  # 即使只有一則訊息也會觸發
+  collect_window_seconds: 60
+
+# 交易設定
+trading:
+  enabled: true
+  auto_execute: true
+  confirmation_delay: 30
+
+  # 只交易 BTC 和 ETH
+  allowed_symbols:
+    - "BTCUSDT"
+    - "ETHUSDT"
+
+  # 各幣種槓桿倍數
+  leverage_map:
+    BTCUSDT: 50
+    ETHUSDT: 25
+  default_leverage: 25
+
+  # 初始參數（AI 會自動優化）
+  min_confidence: 75
+  min_risk_reward: 2.0
+  max_position_size: 5.0       # 每筆固定 5% 倉位
+  max_positions: 2             # 最多同時持 2 倉（BTC + ETH 各一）
+  max_daily_trades: 5          # 每天最多 5 單（高槓桿可能會觸發更多 SL/重新進場）
+  max_daily_loss: 15.0         # 每日最大虧損 15%（50x BTC 一單 SL≈2.5%，允許多次嘗試）
+
+# 風控硬限制（AI 無法修改）
+risk_limits:
+  absolute_max_position: 5.0   # 單筆倉位不超過 5%
+  absolute_max_daily_loss: 20.0  # 日虧硬上限 20%（超過直接停止）
+  emergency_stop_loss: 40.0    # 總帳戶虧 40% 緊急停止一切交易
+  cooldown_minutes: 15         # 冷卻縮短到 15 分鐘（高槓桿行情變化快）
+
+# 定時報告設定
+schedule:
+  timezone: "America/Los_Angeles"
+  morning_hour: 8         # 每天早上 8:00 發送早報
+  evening_hour: 22        # 每天晚上 10:00 發送晚報
+
+# AI 學習設定
+learning:
+  enabled: true
+  min_trades_before_learning: 10
+  analyst_weight_update_frequency: 1
+  parameter_optimization_frequency: 50
+  pattern_analysis_frequency: 20
+
+  weight_decay: 0.95
+  performance_weight: 0.7
+  recency_weight: 0.3
+
+# 通知設定
+notifications:
+  notify_on_signal: true
+  notify_on_entry: true
+  notify_on_exit: true
+  notify_on_learning: true
+  daily_summary: true
+  weekly_report: true
+
+# 數據庫設定
+database:
+  path: "./data/trades.db"
+  backup_frequency: 86400
+
+# 日誌設定
+logging:
+  level: "INFO"
+  file: "./logs/system.log"
+  max_size_mb: 100
+  backup_count: 5

@@ -1,0 +1,26 @@
+# Discord (Self-Bot)
+discord.py-self==2.0.0
+
+# Binance
+python-binance==1.0.19
+
+# Claude AI
+anthropic==0.42.0
+
+# Telegram
+python-telegram-bot==20.7
+
+# Data
+pandas==2.1.4
+numpy==1.26.2
+
+# Database
+sqlalchemy==2.0.25
+
+# Config
+pyyaml==6.0.1
+
+# Utilities
+requests==2.31.0
+python-dotenv==1.0.0
+aiohttp==3.9.1
