@@ -182,6 +182,132 @@ class DecisionEngine:
         logger.warning("Unknown action: %s", action)
         return None
 
+    def process_scanner_signals(self, db_messages: list, symbols: list[str]) -> dict | None:
+        """
+        處理市場掃描器觸發的分析
+
+        db_messages: 資料庫中的 AnalystMessage 記錄
+        symbols: 要掃描的交易對清單
+        """
+        logger.info("Scanner processing %d recent analyst messages for %s",
+                     len(db_messages), symbols)
+
+        # 1. 把 DB 訊息轉成 AI 需要的格式（附帶權重）
+        analyst_msgs = []
+        for m in db_messages:
+            weight = self.db.get_analyst_weight(m.analyst_name)
+            analyst_msgs.append({
+                "analyst": m.analyst_name,
+                "content": m.content,
+                "weight": weight,
+                "channel": m.channel or "",
+                "timestamp": m.timestamp.strftime("%m-%d %H:%M") if m.timestamp else "",
+                "images": [],
+            })
+
+        # 2. 取得市場數據（含所有 K 線和技術指標）
+        combined_market = {}
+        for symbol in symbols:
+            data = self.market.get_symbol_data(symbol)
+            if "error" not in data:
+                combined_market[symbol] = data
+
+        if not combined_market:
+            logger.warning("Scanner: no valid market data available")
+            return None
+
+        # 3. 取得持倉、績效、模式
+        open_trades = self.db.get_open_trades()
+        open_trades_info = [
+            {
+                "trade_id": t.id,
+                "symbol": t.symbol,
+                "direction": t.direction,
+                "entry_price": t.entry_price,
+                "stop_loss": t.stop_loss,
+                "take_profit": json.loads(t.take_profit)
+                    if isinstance(t.take_profit, str) else t.take_profit,
+                "position_size": t.position_size,
+                "confidence": t.confidence,
+            }
+            for t in open_trades
+        ]
+
+        performance_stats = self.db.get_performance_stats()
+        patterns = self.db.get_high_winrate_patterns()
+        pattern_dicts = [
+            {
+                "name": p.pattern_name,
+                "win_rate": p.win_rate,
+                "occurrences": p.occurrences,
+                "avg_profit": p.avg_profit,
+            }
+            for p in patterns
+        ]
+
+        # 4. 經濟日曆
+        econ_text = ""
+        if self.calendar:
+            try:
+                upcoming = self.calendar.get_upcoming_events(hours=24)
+                recent = self.calendar.get_recent_releases(hours=4)
+                all_econ = recent + upcoming
+                econ_text = self.calendar.format_for_ai(all_econ)
+            except Exception as e:
+                logger.warning("Scanner: economic calendar error: %s", e)
+
+        # 5. 呼叫 AI 掃描器分析
+        decision = self.ai.analyze_scanner(
+            analyst_messages=analyst_msgs,
+            market_data=combined_market,
+            open_trades=open_trades_info if open_trades_info else None,
+            performance_stats=performance_stats,
+            known_patterns=pattern_dicts,
+            economic_events=econ_text,
+        )
+
+        action = decision.get("action", "SKIP")
+
+        # 6. 處理決策
+        if action == "SKIP":
+            reason = decision.get("reasoning", {}).get("skip_reason", "N/A")
+            logger.info("Scanner AI recommends SKIP: %s", reason)
+            return decision
+
+        if action == "ADJUST":
+            decision["_analyst_messages"] = analyst_msgs
+            return decision
+
+        if action in ("LONG", "SHORT"):
+            risk_result = self.risk.check(decision)
+
+            if not risk_result.passed:
+                logger.warning("Scanner decision rejected by risk manager:\n%s",
+                               risk_result.summary())
+                return {
+                    **decision,
+                    "_rejected": True,
+                    "_risk_summary": risk_result.summary(),
+                    "_risk_checks": risk_result.checks,
+                }
+
+            decision["_rejected"] = False
+            decision["_risk_summary"] = risk_result.summary()
+            decision["_risk_checks"] = risk_result.checks
+            decision["_analyst_messages"] = analyst_msgs
+
+            logger.info(
+                "Scanner decision approved: %s %s confidence=%d rr=%.2f",
+                action,
+                decision.get("symbol", "?"),
+                decision.get("confidence", 0),
+                decision.get("risk_reward", 0),
+            )
+            return decision
+
+        logger.warning("Scanner: unknown action: %s", action)
+        return None
+
     def _detect_symbols(self, messages: list) -> list[str]:
         """從分析師訊息中偵測提及的幣種"""
         known = {

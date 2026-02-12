@@ -104,6 +104,14 @@ risk_limits:
   emergency_stop_loss: 40.0    # 總帳戶虧 40% 緊急停止一切交易
   cooldown_minutes: 5          # 冷卻縮短到 5 分鐘（短線需要快速反應）
 
+# 市場掃描器設定（主動掃描市場，結合分析師觀點尋找入場機會）
+market_scanner:
+  enabled: true
+  interval_seconds: 300         # 每 5 分鐘掃描一次
+  lookback_hours: 4             # 回看最近 4 小時內的分析師訊息
+  min_cooldown_seconds: 600     # 任何 AI 分析後至少冷卻 10 分鐘
+  min_analyst_messages: 1       # 至少要有 1 則相關分析師訊息才觸發
+
 # 定時報告設定
 schedule:
   timezone: "America/Los_Angeles"

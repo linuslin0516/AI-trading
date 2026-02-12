@@ -306,6 +306,29 @@ class Database:
                     .order_by(AnalystMessage.timestamp.desc())
                     .all())
 
+    def get_recent_analyst_messages_for_symbols(
+        self, hours: int = 4, keywords: list[str] | None = None
+    ) -> list[AnalystMessage]:
+        """取得最近 N 小時內提及特定幣種關鍵字的分析師訊息"""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        with self.get_session() as s:
+            messages = (
+                s.query(AnalystMessage)
+                .filter(AnalystMessage.timestamp >= cutoff)
+                .order_by(AnalystMessage.timestamp.desc())
+                .all()
+            )
+            if keywords is None:
+                return messages
+            result = []
+            for m in messages:
+                text_upper = m.content.upper()
+                for kw in keywords:
+                    if kw.upper() in text_upper:
+                        result.append(m)
+                        break
+            return result
+
     def get_today_analyst_messages(self) -> list[AnalystMessage]:
         today_start = datetime.now(timezone.utc).replace(
             hour=0, minute=0, second=0, microsecond=0

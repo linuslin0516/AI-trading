@@ -66,6 +66,7 @@ class TradingBot:
         self.discord.set_analysis_callback(self._on_signals_received)
 
         self._running = True
+        self._last_ai_call_time: datetime | None = None
 
     async def start(self):
         """啟動所有服務"""
@@ -89,6 +90,14 @@ class TradingBot:
         # 啟動每日早報（8:00 AM）和晚報（10:00 PM）
         morning_task = asyncio.create_task(self._morning_briefing_loop())
         evening_task = asyncio.create_task(self._evening_summary_loop())
+
+        # 啟動市場掃描器
+        scanner_cfg = self.config.get("market_scanner", {})
+        if scanner_cfg.get("enabled", False):
+            scanner_task = asyncio.create_task(self._market_scanner_loop())
+            logger.info("Market scanner enabled (interval=%ds, lookback=%dh)",
+                        scanner_cfg.get("interval_seconds", 300),
+                        scanner_cfg.get("lookback_hours", 4))
 
         # 啟動 Discord（這會阻塞）
         try:
@@ -128,6 +137,9 @@ class TradingBot:
         logger.info("=" * 40)
 
         try:
+            # 記錄 AI 呼叫時間（供掃描器冷卻判斷）
+            self._last_ai_call_time = datetime.now(timezone.utc)
+
             # 0. 儲存所有分析師訊息到資料庫（供早報/晚報使用）
             for m in messages:
                 self.db.save_analyst_message(
@@ -289,6 +301,181 @@ class TradingBot:
         elif event_type == "update":
             # 可選：重要價格變動時通知
             pass
+
+    # ── 市場掃描器 ──
+
+    async def _market_scanner_loop(self):
+        """每 N 分鐘主動掃描市場，結合近期分析師觀點尋找入場機會"""
+        scanner_cfg = self.config.get("market_scanner", {})
+        interval = scanner_cfg.get("interval_seconds", 300)
+        lookback_hours = scanner_cfg.get("lookback_hours", 4)
+        min_cooldown = scanner_cfg.get("min_cooldown_seconds", 600)
+        min_messages = scanner_cfg.get("min_analyst_messages", 1)
+
+        # 幣種關鍵字對應（用於過濾分析師訊息）
+        symbol_keywords = {
+            "BTCUSDT": ["BTC", "比特幣", "大餅"],
+            "ETHUSDT": ["ETH", "乙太", "以太", "姨太"],
+        }
+        allowed_symbols = self.config.get("trading", {}).get(
+            "allowed_symbols", ["BTCUSDT", "ETHUSDT"]
+        )
+        all_keywords = []
+        for sym in allowed_symbols:
+            all_keywords.extend(symbol_keywords.get(sym, [sym.replace("USDT", "")]))
+
+        logger.info("Market scanner started (interval=%ds, lookback=%dh, cooldown=%ds)",
+                     interval, lookback_hours, min_cooldown)
+
+        # 初始延遲 60 秒，等其他模組啟動完成
+        await asyncio.sleep(60)
+
+        while self._running:
+            try:
+                # 1. 冷卻檢查
+                if self._last_ai_call_time:
+                    elapsed = (datetime.now(timezone.utc) - self._last_ai_call_time).total_seconds()
+                    if elapsed < min_cooldown:
+                        logger.debug("Scanner: cooldown active (%.0fs / %ds), skipping",
+                                     elapsed, min_cooldown)
+                        await asyncio.sleep(interval)
+                        continue
+
+                # 2. 查詢近期相關分析師訊息
+                recent_msgs = self.db.get_recent_analyst_messages_for_symbols(
+                    hours=lookback_hours,
+                    keywords=all_keywords,
+                )
+
+                if len(recent_msgs) < min_messages:
+                    logger.debug("Scanner: only %d relevant messages (need %d), skipping",
+                                 len(recent_msgs), min_messages)
+                    await asyncio.sleep(interval)
+                    continue
+
+                # 3. 交易是否啟用
+                if not self.config.get("trading", {}).get("enabled", True):
+                    await asyncio.sleep(interval)
+                    continue
+
+                logger.info("Scanner: found %d relevant analyst messages, triggering analysis",
+                            len(recent_msgs))
+
+                # 4. 執行掃描分析
+                await self._on_scanner_triggered(recent_msgs, allowed_symbols)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Market scanner error: %s", e)
+                try:
+                    await self.telegram.send_error(f"市場掃描器錯誤: {e}")
+                except Exception:
+                    pass
+
+            await asyncio.sleep(interval)
+
+    async def _on_scanner_triggered(self, db_messages: list, symbols: list[str]):
+        """處理掃描器觸發的分析流程"""
+        logger.info("=" * 40)
+        logger.info("Scanner analysis triggered with %d messages for %s",
+                     len(db_messages), symbols)
+        logger.info("=" * 40)
+
+        try:
+            # 記錄 AI 呼叫時間
+            self._last_ai_call_time = datetime.now(timezone.utc)
+
+            # 1. 決策引擎處理掃描信號
+            decision = self.decision.process_scanner_signals(db_messages, symbols)
+
+            if decision is None:
+                logger.info("Scanner: no actionable signal")
+                return
+
+            action = decision.get("action", "")
+            analyst_names = ["scanner"]
+
+            # 2. SKIP
+            if action == "SKIP":
+                logger.info("Scanner: AI recommends SKIP")
+                self.db.save_ai_decision(
+                    decision, outcome="SKIP", analyst_names=analyst_names,
+                )
+                return
+
+            # 3. ADJUST
+            if action == "ADJUST":
+                await self._handle_adjust(decision)
+                return
+
+            # 4. 被風控拒絕
+            if decision.get("_rejected"):
+                logger.warning("Scanner signal rejected by risk manager")
+                self.db.save_ai_decision(
+                    decision, outcome="REJECTED", analyst_names=analyst_names,
+                )
+                await self.telegram.send_rejected_signal(decision)
+                return
+
+            # 5. 交易關閉檢查
+            trading_cfg = self.config.get("trading", {})
+            if not trading_cfg.get("enabled", True):
+                logger.info("Scanner: trading disabled")
+                return
+
+            # 6. Telegram 通知 + 確認倒數（標記為掃描器觸發）
+            countdown = trading_cfg.get("confirmation_delay", 30)
+            decision["_scanner_triggered"] = True
+
+            result = await self.telegram.send_signal(decision, countdown=countdown)
+
+            if result.get("cancelled"):
+                logger.info("Scanner trade cancelled by user")
+                self.db.save_ai_decision(
+                    decision, outcome="CANCELLED",
+                    analyst_names=analyst_names,
+                    cancel_reason=result.get("cancel_reason", ""),
+                )
+                return
+
+            # 7. 執行交易
+            if trading_cfg.get("auto_execute", True):
+                trade_result = self.trader.execute_trade(decision)
+
+                if trade_result.get("success"):
+                    self.db.save_ai_decision(
+                        decision, outcome="EXECUTED",
+                        analyst_names=analyst_names,
+                        trade_id=trade_result["trade_id"],
+                    )
+
+                    # 記錄原始分析師的貢獻
+                    for m in db_messages:
+                        self.db.record_analyst_call(
+                            trade_id=trade_result["trade_id"],
+                            analyst_name=m.analyst_name,
+                            direction=decision["action"],
+                            message=m.content,
+                        )
+
+                    await self.telegram.send_entry_confirmation(trade_result)
+                    self.risk.record_trade_time()
+                    logger.info("Scanner trade #%d executed successfully",
+                                trade_result["trade_id"])
+                else:
+                    error = trade_result.get("error", "Unknown error")
+                    logger.error("Scanner trade execution failed: %s", error)
+                    await self.telegram.send_error(f"掃描器交易執行失敗: {error}")
+
+        except Exception as e:
+            logger.exception("Error in scanner analysis pipeline")
+            try:
+                await self.telegram.send_error(f"掃描器分析錯誤: {e}")
+            except Exception:
+                pass
+
+    # ── 工具方法 ──
 
     def _format_decisions(self, decisions) -> list[dict]:
         """將 DB 的 AIDecision 記錄轉成 dict list 供 AI 報告使用"""

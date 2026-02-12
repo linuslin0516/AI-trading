@@ -91,6 +91,8 @@ class TelegramNotifier:
         pos_size = decision.get("position_size", 0)
 
         direction_icon = "🟢 LONG (做多)" if action == "LONG" else "🔴 SHORT (做空)"
+        is_scanner = decision.get("_scanner_triggered", False)
+        source_label = "🔍 掃描器主動發現" if is_scanner else "🔔 交易訊號"
 
         # 計算預估手續費
         fee_cost = 0
@@ -101,9 +103,13 @@ class TelegramNotifier:
             lev = leverage_map.get(symbol, default_lev)
             fee_cost = self._trader.calc_fee_pct(lev)
 
+        # 掃描器觸發原因
+        scanner_trigger = reasoning.get("scanner_trigger", "")
+        scanner_line = f"觸發: {scanner_trigger}\n" if scanner_trigger else ""
+
         text = (
             f"{'=' * 30}\n"
-            f"🔔 交易訊號\n"
+            f"{source_label}\n"
             f"{'=' * 30}\n\n"
             f"{direction_icon}\n"
             f"交易對: {symbol}\n"
@@ -121,7 +127,8 @@ class TelegramNotifier:
             f"━━━━━━━━━━━━━━━\n"
             f"共識: {reasoning.get('analyst_consensus', 'N/A')}\n"
             f"技術: {reasoning.get('technical', 'N/A')}\n"
-            f"情緒: {reasoning.get('sentiment', 'N/A')}\n\n"
+            f"情緒: {reasoning.get('sentiment', 'N/A')}\n"
+            f"{scanner_line}\n"
             f"📈 風險評估\n"
             f"━━━━━━━━━━━━━━━\n"
             f"最大虧損: {risk.get('max_loss_pct', 0):.2f}%\n"

@@ -301,6 +301,105 @@ EVENING_SUMMARY_TEMPLATE = """## 每日晚報 — {date}
 }}"""
 
 
+SCANNER_PROMPT_TEMPLATE = """## 市場主動掃描分析
+
+⚠️ 重要背景：這不是即時分析師訊息觸發的分析。
+你正在根據「最近幾小時內分析師的觀點」結合「當前最新市場數據」進行主動掃描。
+分析師的訊息可能是幾十分鐘到幾小時前發出的，請特別注意時間戳。
+
+### 最近分析師觀點（按權重排序，注意時間戳）
+{analyst_messages}
+
+### 即時市場數據（含 5m/15m K 線）
+{market_data}
+
+### 目前持倉中的交易
+{open_trades}
+
+### 歷史績效參考
+{performance_stats}
+
+### 已知高勝率模式
+{known_patterns}
+
+### 經濟日曆（近期重要數據）
+{economic_events}
+
+---
+
+你正在主動掃描市場，每 5 分鐘掃描一次。請特別關注：
+1. 分析師之前提到的支撐/壓力位，現價是否已經接近或觸及？
+2. 15 分鐘 K 線的趨勢方向是否與分析師觀點一致？（判斷大方向）
+3. 5 分鐘 K 線是否顯示出適合的入場時機？（回調到支撐位、突破壓力位、K 線反轉信號）
+4. 技術指標（RSI、MACD、布林帶）是否支持入場？
+5. 如果分析師的觀點已經過時（例如價格已經大幅偏離其預測），應該 SKIP
+
+只有在「分析師觀點 + 技術面趨勢 + 入場時機」三者都對齊時，才建議開倉。
+如果條件不明確或時機不對，果斷 SKIP — 5 分鐘後還會再掃描一次，不急。
+
+你可以做以下決策：
+
+### 決策類型 1：開新倉（LONG / SHORT）
+{{
+  "action": "LONG" | "SHORT",
+  "symbol": "交易對",
+  "confidence": 0-100 的整數信心分數,
+
+  "reasoning": {{
+    "analyst_consensus": "分析師共識描述（注意這些是近期觀點的回顧）",
+    "technical": "技術面分析（重點描述 5m/15m K 線如何支持入場）",
+    "sentiment": "市場情緒分析",
+    "scanner_trigger": "什麼條件觸發了這次進場（例如：價格回到分析師提到的支撐位）"
+  }},
+
+  "entry": {{
+    "price": 建議進場價格,
+    "strategy": "LIMIT" | "MARKET",
+    "reason": "進場策略理由"
+  }},
+
+  "stop_loss": 停損價格,
+  "take_profit": [第一目標, 第二目標],
+  "position_size": 建議倉位百分比 (0.5-5.0),
+  "risk_reward": 風險報酬比,
+
+  "risk_assessment": {{
+    "max_loss_pct": 最大虧損百分比（含手續費）,
+    "expected_profit_pct": [第一目標盈利%（已扣手續費）, 第二目標盈利%（已扣手續費）],
+    "fee_cost_pct": 預估往返手續費成本%,
+    "win_probability": 預估勝率 0-1
+  }}
+}}
+
+### 決策類型 2：調整現有持倉（ADJUST）
+{{
+  "action": "ADJUST",
+  "trade_id": 要調整的交易 ID,
+  "symbol": "交易對",
+  "confidence": 0-100,
+  "reasoning": {{
+    "analyst_consensus": "分析師觀點回顧",
+    "technical": "技術面變化",
+    "adjustment_reason": "為什麼需要調整"
+  }},
+  "new_stop_loss": 新的停損價格（null 表示不變）,
+  "new_take_profit": [新的目標1, 新的目標2]（null 表示不變）
+}}
+
+### 決策類型 3：不操作（SKIP）
+{{
+  "action": "SKIP",
+  "symbol": "相關交易對（或 BTCUSDT）",
+  "confidence": 0,
+  "reasoning": {{
+    "analyst_consensus": "描述",
+    "technical": "描述",
+    "sentiment": "描述",
+    "skip_reason": "為什麼這次掃描不操作"
+  }}
+}}"""
+
+
 class AIAnalyzer:
     def __init__(self, config: dict):
         self.config = config
@@ -364,6 +463,50 @@ class AIAnalyzer:
         )
 
         return self._call_claude(prompt, images=images)
+
+    def analyze_scanner(
+        self,
+        analyst_messages: list[dict],
+        market_data: dict,
+        open_trades: list[dict] | None = None,
+        performance_stats: dict | None = None,
+        known_patterns: list[dict] | None = None,
+        economic_events: str = "",
+    ) -> dict:
+        """掃描器專用分析：根據近期分析師觀點 + 最新市場數據主動判斷"""
+        sorted_msgs = sorted(analyst_messages, key=lambda m: m["weight"], reverse=True)
+        analyst_text = ""
+        for m in sorted_msgs:
+            analyst_text += (
+                f"- **{m['analyst']}** (權重: {m['weight']:.2f}) [{m.get('timestamp', '')}]:\n"
+                f"  {m['content']}\n\n"
+            )
+
+        market_text = json.dumps(market_data, indent=2, ensure_ascii=False, default=str)
+
+        if open_trades:
+            trades_text = json.dumps(open_trades, indent=2, ensure_ascii=False, default=str)
+        else:
+            trades_text = "目前沒有持倉"
+
+        perf_text = "尚無歷史數據" if not performance_stats else json.dumps(
+            performance_stats, indent=2, ensure_ascii=False
+        )
+
+        pattern_text = "尚無已知模式" if not known_patterns else json.dumps(
+            known_patterns, indent=2, ensure_ascii=False
+        )
+
+        prompt = SCANNER_PROMPT_TEMPLATE.format(
+            analyst_messages=analyst_text,
+            market_data=market_text,
+            open_trades=trades_text,
+            performance_stats=perf_text,
+            known_patterns=pattern_text,
+            economic_events=economic_events or "近期無重要經濟數據",
+        )
+
+        return self._call_claude(prompt)
 
     def review_trade(self, trade_data: dict) -> dict:
         """平倉後 AI 覆盤"""
