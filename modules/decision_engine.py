@@ -59,6 +59,7 @@ class DecisionEngine:
                 "weight": weight,
                 "channel": m.channel_name,
                 "timestamp": m.timestamp.isoformat(),
+                "images": getattr(m, "images", []),
             })
 
         # 2. 偵測提及的幣種

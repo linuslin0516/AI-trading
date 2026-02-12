@@ -317,6 +317,12 @@ class AIAnalyzer:
                 f"  {m['content']}\n\n"
             )
 
+        # 收集所有圖片
+        images = []
+        for m in sorted_msgs:
+            for img in m.get("images", []):
+                images.append(img)
+
         # 格式化市場數據
         market_text = json.dumps(market_data, indent=2, ensure_ascii=False, default=str)
 
@@ -345,7 +351,7 @@ class AIAnalyzer:
             economic_events=economic_events or "近期無重要經濟數據",
         )
 
-        return self._call_claude(prompt)
+        return self._call_claude(prompt, images=images)
 
     def review_trade(self, trade_data: dict) -> dict:
         """平倉後 AI 覆盤"""
@@ -489,15 +495,34 @@ class AIAnalyzer:
 
         return "\n".join(lines)
 
-    def _call_claude(self, prompt: str) -> dict:
+    def _call_claude(self, prompt: str, images: list[dict] | None = None) -> dict:
         text = ""
         try:
+            # 組裝 content（支援多模態：文字 + 圖片）
+            if images:
+                content = []
+                # 先放圖片
+                for img in images[:4]:  # 最多 4 張圖片
+                    content.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img["media_type"],
+                            "data": img["base64"],
+                        },
+                    })
+                # 再放文字 prompt
+                content.append({"type": "text", "text": prompt})
+                logger.info("Sending %d image(s) to Claude for analysis", len(images[:4]))
+            else:
+                content = prompt
+
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
                 system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": content}],
             )
 
             if not response.content:

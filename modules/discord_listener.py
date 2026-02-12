@@ -1,12 +1,17 @@
 import asyncio
+import base64
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Coroutine
 
+import aiohttp
 import discord
 
 logger = logging.getLogger(__name__)
+
+# 支援的圖片格式
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 
 @dataclass
@@ -17,6 +22,8 @@ class AnalystMessage:
     content: str
     timestamp: datetime
     weight: float = 1.0
+    images: list[dict] = field(default_factory=list)
+    # images: [{"base64": "...", "media_type": "image/png"}, ...]
 
 
 class MessageBuffer:
@@ -139,6 +146,19 @@ class DiscordListener:
             weight = self._analyst_weights.get(analyst, info["weight"])
 
             content = message.content
+
+            # 處理回覆：抓取被回覆的原始訊息內容
+            if message.reference and message.reference.message_id:
+                try:
+                    ref_msg = await message.channel.fetch_message(
+                        message.reference.message_id
+                    )
+                    ref_text = ref_msg.content or ""
+                    if ref_text:
+                        content = f"[回覆 {ref_msg.author.display_name}: {ref_text}]\n{content}"
+                except Exception:
+                    pass
+
             # 處理嵌入消息
             for embed in message.embeds:
                 if embed.description:
@@ -146,21 +166,75 @@ class DiscordListener:
                 if embed.title:
                     content = embed.title + "\n" + content
 
-            if not content.strip():
+            # 下載圖片附件
+            images = []
+            for attachment in message.attachments:
+                if any(attachment.filename.lower().endswith(ext)
+                       for ext in IMAGE_EXTENSIONS):
+                    img_data = await self._download_image(attachment.url)
+                    if img_data:
+                        # 判斷 media type
+                        ext = attachment.filename.rsplit(".", 1)[-1].lower()
+                        media_map = {
+                            "png": "image/png", "jpg": "image/jpeg",
+                            "jpeg": "image/jpeg", "gif": "image/gif",
+                            "webp": "image/webp",
+                        }
+                        images.append({
+                            "base64": img_data,
+                            "media_type": media_map.get(ext, "image/png"),
+                        })
+                        content += "\n[附圖：分析師附上了一張圖片]"
+
+            # 處理 embed 中的圖片
+            for embed in message.embeds:
+                if embed.image and embed.image.url:
+                    img_data = await self._download_image(embed.image.url)
+                    if img_data:
+                        images.append({
+                            "base64": img_data,
+                            "media_type": "image/png",
+                        })
+                        content += "\n[附圖：嵌入圖片]"
+
+            if not content.strip() and not images:
                 return
 
             msg = AnalystMessage(
                 analyst=analyst,
                 channel_id=cid,
                 channel_name=info["name"],
-                content=content.strip(),
+                content=content.strip() or "[僅圖片訊息]",
                 timestamp=datetime.now(timezone.utc),
                 weight=weight,
+                images=images,
             )
             await self.buffer.add_message(msg)
 
+            if images:
+                logger.info("Message from %s includes %d image(s)",
+                            analyst, len(images))
+
         logger.info("Starting Discord listener...")
         await client.start(self.token)
+
+    @staticmethod
+    async def _download_image(url: str) -> str | None:
+        """下載圖片並轉為 base64"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        # 限制 5MB
+                        if len(data) > 5 * 1024 * 1024:
+                            logger.warning("Image too large: %d bytes", len(data))
+                            return None
+                        return base64.b64encode(data).decode("utf-8")
+                    logger.warning("Image download failed: %d", resp.status)
+        except Exception as e:
+            logger.error("Image download error: %s", e)
+        return None
 
     async def stop(self):
         if self._client:
