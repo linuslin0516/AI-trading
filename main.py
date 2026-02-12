@@ -365,11 +365,39 @@ class TradingBot:
                     await asyncio.sleep(interval)
                     continue
 
-                logger.info("Scanner: found %d relevant analyst messages, triggering analysis",
-                            len(recent_msgs))
+                # 4. 過濾掉已有持倉的幣種（不重複開倉）
+                open_trades = self.db.get_open_trades()
+                held_symbols = {t.symbol for t in open_trades}
+                scan_symbols = [s for s in allowed_symbols if s not in held_symbols]
 
-                # 4. 執行掃描分析
-                await self._on_scanner_triggered(recent_msgs, allowed_symbols)
+                if not scan_symbols:
+                    logger.debug("Scanner: all symbols have open positions (%s), skipping",
+                                 ", ".join(held_symbols))
+                    await asyncio.sleep(interval)
+                    continue
+
+                # 5. 過濾關鍵字（只保留需要掃描的幣種）
+                scan_keywords = []
+                for sym in scan_symbols:
+                    scan_keywords.extend(symbol_keywords.get(sym, [sym.replace("USDT", "")]))
+
+                relevant_msgs = [
+                    m for m in recent_msgs
+                    if any(kw.upper() in m.content.upper() for kw in scan_keywords)
+                ] if scan_symbols != allowed_symbols else recent_msgs
+
+                if len(relevant_msgs) < min_messages:
+                    logger.debug("Scanner: only %d relevant messages for %s, skipping",
+                                 len(relevant_msgs), scan_symbols)
+                    await asyncio.sleep(interval)
+                    continue
+
+                logger.info("Scanner: found %d relevant messages, scanning %s (held: %s)",
+                            len(relevant_msgs), scan_symbols,
+                            ", ".join(held_symbols) if held_symbols else "none")
+
+                # 6. 執行掃描分析（只掃沒有持倉的幣種）
+                await self._on_scanner_triggered(relevant_msgs, scan_symbols)
 
             except asyncio.CancelledError:
                 break

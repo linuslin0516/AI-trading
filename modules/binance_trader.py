@@ -229,7 +229,22 @@ class BinanceTrader:
         """設定停損和停利單"""
         close_side = "SELL" if direction == "LONG" else "BUY"
 
-        # 停損
+        # 取得數量精度
+        qty_precision = 8
+        try:
+            exchange_info = self._futures_get("/fapi/v1/exchangeInfo")
+            for s in exchange_info.get("symbols", []):
+                if s["symbol"] == symbol:
+                    for f in s["filters"]:
+                        if f["filterType"] == "LOT_SIZE":
+                            step = float(f["stepSize"])
+                            qty_precision = len(str(step).rstrip("0").split(".")[-1])
+                            break
+                    break
+        except Exception as e:
+            logger.warning("Failed to get quantity precision: %s", e)
+
+        # 停損（全部平倉）
         try:
             self._futures_post("/fapi/v1/order", {
                 "symbol": symbol,
@@ -242,10 +257,14 @@ class BinanceTrader:
         except Exception as e:
             logger.warning("Failed to set SL: %s", e)
 
-        # 停利（第一目標，平倉 50%）
-        if take_profit:
+        if not take_profit:
+            return
+
+        if len(take_profit) >= 2:
+            # 有兩個目標：TP1 平 50%，TP2 平剩餘全部
+            # TP1（平倉 50%）
             try:
-                tp_qty = round(quantity * 0.5, 8)
+                tp_qty = round(quantity * 0.5, qty_precision)
                 self._futures_post("/fapi/v1/order", {
                     "symbol": symbol,
                     "side": close_side,
@@ -254,6 +273,32 @@ class BinanceTrader:
                     "quantity": tp_qty,
                 })
                 logger.info("Take profit 1 set at %s (qty=%s)", take_profit[0], tp_qty)
+            except Exception as e:
+                logger.warning("Failed to set TP1: %s", e)
+
+            # TP2（closePosition 平剩餘全部）
+            try:
+                self._futures_post("/fapi/v1/order", {
+                    "symbol": symbol,
+                    "side": close_side,
+                    "type": "TAKE_PROFIT_MARKET",
+                    "stopPrice": take_profit[1],
+                    "closePosition": "true",
+                })
+                logger.info("Take profit 2 set at %s (close all)", take_profit[1])
+            except Exception as e:
+                logger.warning("Failed to set TP2: %s", e)
+        else:
+            # 只有一個目標：全部平倉
+            try:
+                self._futures_post("/fapi/v1/order", {
+                    "symbol": symbol,
+                    "side": close_side,
+                    "type": "TAKE_PROFIT_MARKET",
+                    "stopPrice": take_profit[0],
+                    "closePosition": "true",
+                })
+                logger.info("Take profit set at %s (close all)", take_profit[0])
             except Exception as e:
                 logger.warning("Failed to set TP: %s", e)
 
