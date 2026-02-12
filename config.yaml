@@ -81,6 +81,12 @@ trading:
     ETHUSDT: 25
   default_leverage: 25
 
+  # 手續費設定 (Binance Futures)
+  fees:
+    taker_rate: 0.0004         # Taker 手續費 0.04%（市價單）
+    maker_rate: 0.0002         # Maker 手續費 0.02%（限價單）
+    slippage: 0.0001           # 預估滑點 0.01%
+
   # 短線高頻參數
   min_confidence: 60           # 降低信心門檻，讓 AI 更積極進場
   min_risk_reward: 1.5         # 短線交易 RR 1.5 即可

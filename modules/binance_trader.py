@@ -28,11 +28,17 @@ class BinanceTrader:
         self.api_key = binance_cfg.get("api_key", "")
         self.api_secret = binance_cfg.get("api_secret", "")
 
+        # 手續費設定
+        fees_cfg = trading_cfg.get("fees", {})
+        self.taker_rate = fees_cfg.get("taker_rate", 0.0004)
+        self.maker_rate = fees_cfg.get("maker_rate", 0.0002)
+        self.slippage = fees_cfg.get("slippage", 0.0001)
+
         self.session = requests.Session()
         self.session.headers.update({"X-MBX-APIKEY": self.api_key})
 
-        logger.info("BinanceTrader initialized (futures testnet, leverage=%s)",
-                     self.leverage_map or self.default_leverage)
+        logger.info("BinanceTrader initialized (futures testnet, leverage=%s, taker=%.4f%%)",
+                     self.leverage_map or self.default_leverage, self.taker_rate * 100)
 
     def _sign(self, params: dict) -> dict:
         """為請求添加簽名"""
@@ -332,6 +338,15 @@ class BinanceTrader:
             logger.error("Failed to adjust trade #%d: %s", trade_id, e)
             return {"success": False, "error": str(e)}
 
+    def calc_fee_pct(self, leverage: int, entry_type: str = "TAKER", exit_type: str = "TAKER") -> float:
+        """計算往返手續費 (佔保證金的百分比)
+
+        fee_pct = (entry_fee + exit_fee + slippage*2) * leverage * 100
+        """
+        entry_rate = self.taker_rate if entry_type == "TAKER" else self.maker_rate
+        exit_rate = self.taker_rate if exit_type == "TAKER" else self.maker_rate
+        return (entry_rate + exit_rate + self.slippage * 2) * leverage * 100
+
     def close_trade(self, trade_id: int, exit_price: float | None = None) -> dict:
         """手動或自動平倉"""
         trade = self.db.get_trade(trade_id)
@@ -385,7 +400,7 @@ class BinanceTrader:
                 )
                 exit_price = float(r.json()["price"])
 
-            # 計算盈虧
+            # 計算盈虧（扣除手續費 + 滑點）
             leverage = self.leverage_map.get(symbol, self.default_leverage)
             if direction == "LONG":
                 profit_pct = (exit_price - trade.entry_price) / trade.entry_price * 100
@@ -393,6 +408,10 @@ class BinanceTrader:
                 profit_pct = (trade.entry_price - exit_price) / trade.entry_price * 100
 
             profit_pct *= leverage
+
+            # 扣除往返手續費
+            fee_pct = self.calc_fee_pct(leverage)
+            profit_pct -= fee_pct
 
             # 計算持倉時間
             now = datetime.now(timezone.utc)
@@ -415,8 +434,8 @@ class BinanceTrader:
             )
 
             logger.info(
-                "Trade #%d closed: %s %.2f%% @ %s",
-                trade_id, outcome, profit_pct, exit_price,
+                "Trade #%d closed: %s %.2f%% (fee: %.2f%%) @ %s",
+                trade_id, outcome, profit_pct, fee_pct, exit_price,
             )
 
             return {
@@ -424,6 +443,7 @@ class BinanceTrader:
                 "trade_id": trade_id,
                 "exit_price": exit_price,
                 "profit_pct": profit_pct,
+                "fee_pct": fee_pct,
                 "outcome": outcome,
                 "hold_duration": hold_duration,
             }
@@ -446,7 +466,7 @@ class BinanceTrader:
                         )
                         current_price = float(r.json()["price"])
 
-                        # 計算未實現盈虧
+                        # 計算未實現盈虧（含預估手續費）
                         leverage = self.leverage_map.get(trade.symbol, self.default_leverage)
                         if trade.direction == "LONG":
                             unrealized = (current_price - trade.entry_price) / trade.entry_price * 100
@@ -454,6 +474,10 @@ class BinanceTrader:
                             unrealized = (trade.entry_price - current_price) / trade.entry_price * 100
 
                         unrealized *= leverage
+
+                        # 扣除預估往返手續費
+                        fee_pct = self.calc_fee_pct(leverage)
+                        unrealized -= fee_pct
 
                         # 檢查是否觸及停損
                         if trade.direction == "LONG" and current_price <= trade.stop_loss:

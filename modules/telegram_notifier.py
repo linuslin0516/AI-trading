@@ -92,6 +92,15 @@ class TelegramNotifier:
 
         direction_icon = "🟢 LONG (做多)" if action == "LONG" else "🔴 SHORT (做空)"
 
+        # 計算預估手續費
+        fee_cost = 0
+        if self._trader:
+            trading_cfg = self.config.get("trading", {})
+            leverage_map = trading_cfg.get("leverage_map", {})
+            default_lev = trading_cfg.get("default_leverage", 25)
+            lev = leverage_map.get(symbol, default_lev)
+            fee_cost = self._trader.calc_fee_pct(lev)
+
         text = (
             f"{'=' * 30}\n"
             f"🔔 交易訊號\n"
@@ -106,7 +115,8 @@ class TelegramNotifier:
             f"目標 1: {format_price(tp[0]) if tp else 'N/A'}\n"
             f"目標 2: {format_price(tp[1]) if len(tp) > 1 else 'N/A'}\n"
             f"倉位: {pos_size}%\n"
-            f"風報比: {rr:.2f}\n\n"
+            f"風報比: {rr:.2f}\n"
+            f"預估手續費: -{fee_cost:.2f}%\n\n"
             f"🤖 AI 分析\n"
             f"━━━━━━━━━━━━━━━\n"
             f"共識: {reasoning.get('analyst_consensus', 'N/A')}\n"
@@ -116,6 +126,7 @@ class TelegramNotifier:
             f"━━━━━━━━━━━━━━━\n"
             f"最大虧損: {risk.get('max_loss_pct', 0):.2f}%\n"
             f"預期獲利: {risk.get('expected_profit_pct', [0])[0]:.2f}%\n"
+            f"手續費成本: {risk.get('fee_cost_pct', fee_cost):.2f}%\n"
             f"勝率: {risk.get('win_probability', 0) * 100:.0f}%\n\n"
             f"⏱️ {countdown} 秒後自動執行...\n"
         )
@@ -226,6 +237,7 @@ class TelegramNotifier:
 
         outcome_icon = "✅" if result.get("outcome") == "WIN" else "❌"
         profit = result.get("profit_pct", 0)
+        fee = result.get("fee_pct", 0)
         hold_sec = result.get("hold_duration", 0)
         hold_str = self._format_duration(hold_sec)
 
@@ -237,7 +249,7 @@ class TelegramNotifier:
             f"━━━━━━━━━━━━━━━\n"
             f"進場: {format_price(trade.entry_price)}\n"
             f"出場: {format_price(result.get('exit_price', 0))}\n"
-            f"獲利: {format_pct(profit)}\n"
+            f"獲利: {format_pct(profit)} (手續費: -{fee:.2f}%)\n"
             f"持倉: {hold_str}\n"
         )
 
@@ -671,7 +683,7 @@ class TelegramNotifier:
         text = f"{balance_text}📊 當前持倉 ({len(open_trades)} 筆)\n{'=' * 25}\n\n"
 
         for t in open_trades:
-            # 取得當前價格計算未實現盈虧
+            # 取得當前價格計算未實現盈虧（含手續費）
             try:
                 r = requests.get(
                     f"{MARKET_DATA_URL}/api/v3/ticker/price",
@@ -685,10 +697,17 @@ class TelegramNotifier:
                 else:
                     pnl_pct = (t.entry_price - current_price) / t.entry_price * 100 * leverage
 
+                # 扣除預估往返手續費
+                fee_pct = 0
+                if self._trader:
+                    fee_pct = self._trader.calc_fee_pct(leverage)
+                    pnl_pct -= fee_pct
+
                 pnl_icon = "🟢" if pnl_pct >= 0 else "🔴"
             except Exception:
                 current_price = 0
                 pnl_pct = 0
+                fee_pct = 0
                 pnl_icon = "⚪"
 
             direction_icon = "🟢" if t.direction == "LONG" else "🔴"
@@ -699,7 +718,7 @@ class TelegramNotifier:
                 f"  槓桿: {t.leverage}x\n"
                 f"  進場: {format_price(t.entry_price)}\n"
                 f"  現價: {format_price(current_price)}\n"
-                f"  {pnl_icon} 未實現: {pnl_pct:+.2f}%\n"
+                f"  {pnl_icon} 未實現: {pnl_pct:+.2f}% (手續費: -{fee_pct:.2f}%)\n"
                 f"  停損: {format_price(t.stop_loss)}\n"
                 f"  目標: {', '.join(format_price(p) for p in tp_list) if tp_list else 'N/A'}\n"
                 f"  倉位: {t.position_size}%\n"
@@ -779,13 +798,14 @@ class TelegramNotifier:
 
         if result.get("success"):
             pnl = result.get("profit_pct", 0)
+            fee = result.get("fee_pct", 0)
             pnl_icon = "🟢" if pnl >= 0 else "🔴"
             await update.message.reply_text(
                 f"✅ 交易 #{trade_id} 已平倉\n\n"
                 f"{trade.direction} {trade.symbol}\n"
                 f"進場: {format_price(trade.entry_price)}\n"
                 f"出場: {format_price(result.get('exit_price', 0))}\n"
-                f"{pnl_icon} 盈虧: {pnl:+.2f}%\n"
+                f"{pnl_icon} 盈虧: {pnl:+.2f}% (手續費: -{fee:.2f}%)\n"
                 f"結果: {result.get('outcome', 'N/A')}"
             )
         else:
@@ -817,9 +837,10 @@ class TelegramNotifier:
             result = self._trader.close_trade(t.id)
             if result.get("success"):
                 pnl = result.get("profit_pct", 0)
+                fee = result.get("fee_pct", 0)
                 pnl_icon = "🟢" if pnl >= 0 else "🔴"
                 results.append(
-                    f"{pnl_icon} #{t.id} {t.direction} {t.symbol}: {pnl:+.2f}%"
+                    f"{pnl_icon} #{t.id} {t.direction} {t.symbol}: {pnl:+.2f}% (費: -{fee:.2f}%)"
                 )
             else:
                 results.append(
