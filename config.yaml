@@ -90,7 +90,7 @@ trading:
   # 短線高頻參數
   min_confidence: 60           # 降低信心門檻，讓 AI 更積極進場
   min_risk_reward: 1.5         # 短線交易 RR 1.5 即可
-  max_position_size: 5.0       # 每筆固定 5% 倉位
+  max_position_size: 5.0       # 每筆最多 5% 倉位（AI 根據信心自行決定 1-5%）
   max_positions: 2             # 最多同時持 2 倉（BTC + ETH 各一）
   max_daily_trades: 20         # 短線高頻，不限制次數（贏就繼續開）
   max_daily_loss: 15.0         # 每日最大虧損 15%
@@ -107,9 +107,9 @@ risk_limits:
 # 市場掃描器設定（主動掃描市場，結合分析師觀點尋找入場機會）
 market_scanner:
   enabled: true
-  interval_seconds: 300         # 每 5 分鐘掃描一次
+  interval_seconds: 180         # 每 3 分鐘掃描一次（高頻策略）
   lookback_hours: 4             # 回看最近 4 小時內的分析師訊息
-  min_cooldown_seconds: 600     # 任何 AI 分析後至少冷卻 10 分鐘
+  min_cooldown_seconds: 300     # 任何 AI 分析後至少冷卻 5 分鐘
   min_analyst_messages: 1       # 至少要有 1 則相關分析師訊息才觸發
 
 # 定時報告設定
