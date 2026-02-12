@@ -140,12 +140,19 @@ class TradingBot:
             # 記錄 AI 呼叫時間（供掃描器冷卻判斷）
             self._last_ai_call_time = datetime.now(timezone.utc)
 
-            # 0. 儲存所有分析師訊息到資料庫（供早報/晚報使用）
+            # 0. 儲存所有分析師訊息到資料庫（供早報/晚報/掃描器使用）
             for m in messages:
+                # 提取圖片 URL（不存 base64，只存 URL 供掃描器重新下載）
+                img_urls = [
+                    {"url": img["url"], "media_type": img["media_type"]}
+                    for img in getattr(m, "images", [])
+                    if img.get("url")
+                ] or None
                 self.db.save_analyst_message(
                     analyst_name=m.analyst,
                     channel=m.channel_name,
                     content=m.content,
+                    images=img_urls,
                 )
 
             analyst_names = [m.analyst for m in messages]

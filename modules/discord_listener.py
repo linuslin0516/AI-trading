@@ -23,7 +23,7 @@ class AnalystMessage:
     timestamp: datetime
     weight: float = 1.0
     images: list[dict] = field(default_factory=list)
-    # images: [{"base64": "...", "media_type": "image/png"}, ...]
+    # images: [{"base64": "...", "media_type": "image/png", "url": "..."}, ...]
 
 
 class MessageBuffer:
@@ -183,6 +183,7 @@ class DiscordListener:
                         images.append({
                             "base64": img_data,
                             "media_type": media_map.get(ext, "image/png"),
+                            "url": attachment.url,
                         })
                         content += "\n[附圖：分析師附上了一張圖片]"
 
@@ -194,6 +195,7 @@ class DiscordListener:
                         images.append({
                             "base64": img_data,
                             "media_type": "image/png",
+                            "url": embed.image.url,
                         })
                         content += "\n[附圖：嵌入圖片]"
 

@@ -482,6 +482,12 @@ class AIAnalyzer:
                 f"  {m['content']}\n\n"
             )
 
+        # 收集所有圖片（從 DB URL 重新下載的）
+        images = []
+        for m in sorted_msgs:
+            for img in m.get("images", []):
+                images.append(img)
+
         market_text = json.dumps(market_data, indent=2, ensure_ascii=False, default=str)
 
         if open_trades:
@@ -506,7 +512,7 @@ class AIAnalyzer:
             economic_events=economic_events or "近期無重要經濟數據",
         )
 
-        return self._call_claude(prompt)
+        return self._call_claude(prompt, images=images if images else None)
 
     def review_trade(self, trade_data: dict) -> dict:
         """平倉後 AI 覆盤"""

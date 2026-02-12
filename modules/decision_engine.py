@@ -1,6 +1,9 @@
+import base64
 import json
 import logging
 from datetime import datetime, timezone
+
+import requests
 
 from modules.ai_analyzer import AIAnalyzer
 from modules.database import Database
@@ -192,17 +195,19 @@ class DecisionEngine:
         logger.info("Scanner processing %d recent analyst messages for %s",
                      len(db_messages), symbols)
 
-        # 1. 把 DB 訊息轉成 AI 需要的格式（附帶權重）
+        # 1. 把 DB 訊息轉成 AI 需要的格式（附帶權重 + 圖片）
         analyst_msgs = []
         for m in db_messages:
             weight = self.db.get_analyst_weight(m.analyst_name)
+            # 從 DB 載入圖片 URL 並重新下載
+            images = self._load_images_from_db(m)
             analyst_msgs.append({
                 "analyst": m.analyst_name,
                 "content": m.content,
                 "weight": weight,
                 "channel": m.channel or "",
                 "timestamp": m.timestamp.strftime("%m-%d %H:%M") if m.timestamp else "",
-                "images": [],
+                "images": images,
             })
 
         # 2. 取得市場數據（含所有 K 線和技術指標）
@@ -333,3 +338,34 @@ class DecisionEngine:
                     found.add(symbol)
         # 如果沒偵測到，用配置的
         return list(found) if found else list(self.config["binance"].get("symbols", []))
+
+    @staticmethod
+    def _load_images_from_db(msg) -> list[dict]:
+        """從 DB 的 AnalystMessage 載入圖片 URL 並重新下載為 base64"""
+        if not getattr(msg, "images", None):
+            return []
+        try:
+            url_list = json.loads(msg.images) if isinstance(msg.images, str) else msg.images
+        except (json.JSONDecodeError, TypeError):
+            return []
+        if not url_list:
+            return []
+
+        result = []
+        for img_info in url_list[:4]:  # 最多 4 張
+            url = img_info.get("url", "")
+            if not url:
+                continue
+            try:
+                resp = requests.get(url, timeout=15)
+                if resp.status_code == 200 and len(resp.content) <= 5 * 1024 * 1024:
+                    result.append({
+                        "base64": base64.b64encode(resp.content).decode("utf-8"),
+                        "media_type": img_info.get("media_type", "image/png"),
+                    })
+                else:
+                    logger.warning("Image download failed: status=%d size=%d url=%s",
+                                   resp.status_code, len(resp.content), url[:80])
+            except Exception as e:
+                logger.warning("Failed to download image from DB URL: %s", e)
+        return result

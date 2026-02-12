@@ -114,6 +114,7 @@ class AnalystMessage(Base):
     analyst_name = Column(String(50), nullable=False)
     channel = Column(String(100))
     content = Column(Text, nullable=False)
+    images = Column(Text)  # JSON: [{"url": "...", "media_type": "image/png"}, ...]
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -165,8 +166,24 @@ class Database:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.engine = create_engine(f"sqlite:///{db_path}", echo=False)
         Base.metadata.create_all(self.engine)
+        self._migrate(self.engine)
         self._Session = sessionmaker(bind=self.engine)
         logger.info("Database initialized: %s", db_path)
+
+    @staticmethod
+    def _migrate(engine):
+        """自動遷移：為已存在的資料表新增缺少的欄位"""
+        from sqlalchemy import inspect, text
+        inspector = inspect(engine)
+        # analyst_messages: 新增 images 欄位
+        if "analyst_messages" in inspector.get_table_names():
+            cols = [c["name"] for c in inspector.get_columns("analyst_messages")]
+            if "images" not in cols:
+                with engine.begin() as conn:
+                    conn.execute(text(
+                        "ALTER TABLE analyst_messages ADD COLUMN images TEXT"
+                    ))
+                logger.info("Migrated: added 'images' column to analyst_messages")
 
     def get_session(self) -> Session:
         return self._Session()
@@ -288,12 +305,16 @@ class Database:
 
     # ── Analyst message storage ──
 
-    def save_analyst_message(self, analyst_name: str, channel: str, content: str):
+    def save_analyst_message(
+        self, analyst_name: str, channel: str, content: str,
+        images: list[dict] | None = None,
+    ):
         with self.get_session() as s:
             msg = AnalystMessage(
                 analyst_name=analyst_name,
                 channel=channel,
                 content=content,
+                images=json.dumps(images, ensure_ascii=False) if images else None,
             )
             s.add(msg)
             s.commit()
