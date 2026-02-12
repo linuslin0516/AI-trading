@@ -311,8 +311,10 @@ class DecisionEngine:
     def _detect_symbols(self, messages: list) -> list[str]:
         """從分析師訊息中偵測提及的幣種"""
         known = {
-            "BTC": "BTCUSDT", "比特幣": "BTCUSDT", "大餅": "BTCUSDT",
-            "ETH": "ETHUSDT", "乙太": "ETHUSDT", "以太": "ETHUSDT", "姨太": "ETHUSDT",
+            "BTC": "BTCUSDT", "比特幣": "BTCUSDT", "比特币": "BTCUSDT",
+            "大餅": "BTCUSDT", "大饼": "BTCUSDT",
+            "ETH": "ETHUSDT", "乙太": "ETHUSDT", "以太": "ETHUSDT",
+            "以太坊": "ETHUSDT", "姨太": "ETHUSDT",
             "SOL": "SOLUSDT",
             "BNB": "BNBUSDT",
             "XRP": "XRPUSDT",

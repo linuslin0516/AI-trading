@@ -312,10 +312,10 @@ class TradingBot:
         min_cooldown = scanner_cfg.get("min_cooldown_seconds", 600)
         min_messages = scanner_cfg.get("min_analyst_messages", 1)
 
-        # 幣種關鍵字對應（用於過濾分析師訊息）
+        # 幣種關鍵字對應（用於過濾分析師訊息，簡繁體都要）
         symbol_keywords = {
-            "BTCUSDT": ["BTC", "比特幣", "大餅"],
-            "ETHUSDT": ["ETH", "乙太", "以太", "姨太"],
+            "BTCUSDT": ["BTC", "btc", "比特幣", "比特币", "大餅", "大饼"],
+            "ETHUSDT": ["ETH", "eth", "乙太", "以太", "以太坊", "姨太"],
         }
         allowed_symbols = self.config.get("trading", {}).get(
             "allowed_symbols", ["BTCUSDT", "ETHUSDT"]
