@@ -638,13 +638,33 @@ class TelegramNotifier:
             await update.message.reply_text("❌ 資料庫未初始化")
             return
 
+        # 取得帳戶餘額
+        balance_text = ""
+        if self._trader:
+            try:
+                account = self._trader._futures_get("/fapi/v2/account", signed=True)
+                wallet = float(account.get("totalWalletBalance", 0))
+                unrealized = float(account.get("totalUnrealizedProfit", 0))
+                margin = float(account.get("totalMarginBalance", 0))
+                available = float(account.get("availableBalance", 0))
+                balance_text = (
+                    f"💰 帳戶資訊\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"錢包餘額: {wallet:,.2f} USDT\n"
+                    f"未實現盈虧: {unrealized:+,.2f} USDT\n"
+                    f"保證金餘額: {margin:,.2f} USDT\n"
+                    f"可用餘額: {available:,.2f} USDT\n\n"
+                )
+            except Exception as e:
+                balance_text = f"💰 帳戶餘額: 查詢失敗 ({e})\n\n"
+
         open_trades = self._db.get_open_trades()
 
         if not open_trades:
-            await update.message.reply_text("📊 目前沒有持倉")
+            await update.message.reply_text(f"{balance_text}📊 目前沒有持倉")
             return
 
-        text = f"📊 當前持倉 ({len(open_trades)} 筆)\n{'=' * 25}\n\n"
+        text = f"{balance_text}📊 當前持倉 ({len(open_trades)} 筆)\n{'=' * 25}\n\n"
 
         for t in open_trades:
             # 取得當前價格計算未實現盈虧
