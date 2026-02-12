@@ -364,7 +364,10 @@ class BinanceTrader:
 
             # 計算持倉時間
             now = datetime.now(timezone.utc)
-            hold_duration = int((now - trade.timestamp).total_seconds())
+            trade_ts = trade.timestamp
+            if trade_ts.tzinfo is None:
+                trade_ts = trade_ts.replace(tzinfo=timezone.utc)
+            hold_duration = int((now - trade_ts).total_seconds())
 
             # 更新記錄
             outcome = "WIN" if profit_pct > 0 else ("LOSS" if profit_pct < 0 else "BREAKEVEN")
