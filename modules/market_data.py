@@ -58,8 +58,14 @@ class MarketData:
             # K 線數據
             data["klines"] = self._get_klines(symbol)
 
-            # 技術指標
+            # 技術指標（基於 1h 收盤價）
             data["technical_indicators"] = self._calc_indicators(data["klines"])
+
+            # 15m 技術指標（基於 15m 收盤價，用於入場時機判斷）
+            data["technical_indicators_15m"] = self._calc_15m_indicators(data["klines"])
+
+            # 收盤價趨勢摘要（讓 AI 快速理解趨勢方向，不受影子線干擾）
+            data["close_trend"] = self._close_trend_summary(data["klines"])
 
             # 資金費率（期貨）
             data["funding_rate"] = self._get_funding_rate(symbol)
@@ -80,13 +86,20 @@ class MarketData:
         return result
 
     def _get_klines(self, symbol: str) -> dict:
-        """多時間週期 K 線"""
-        intervals = ["1m", "5m", "15m", "1h", "4h", "1d"]
+        """多時間週期 K 線（各週期取適當數量，避免過多噪音）"""
+        # 各時間週期的 K 線數量（不需要都取 100 根）
+        interval_limits = {
+            "5m": 30,    # 2.5 小時
+            "15m": 40,   # 10 小時
+            "1h": 48,    # 2 天
+            "4h": 30,    # 5 天
+            "1d": 14,    # 2 週
+        }
         result = {}
-        for interval in intervals:
+        for interval, limit in interval_limits.items():
             try:
                 klines = self._market_get("/api/v3/klines", {
-                    "symbol": symbol, "interval": interval, "limit": 100
+                    "symbol": symbol, "interval": interval, "limit": limit
                 })
                 result[interval] = [
                     {
@@ -172,6 +185,94 @@ class MarketData:
             indicators["trend"] = "bullish"
         elif indicators["EMA_7"] < indicators["EMA_25"] < indicators["EMA_99"]:
             indicators["trend"] = "strong_bearish"
+        elif indicators["EMA_7"] < indicators["EMA_25"]:
+            indicators["trend"] = "bearish"
+        else:
+            indicators["trend"] = "neutral"
+
+        return indicators
+
+    def _close_trend_summary(self, klines: dict) -> dict:
+        """產出各時間週期的收盤價趨勢摘要（去除影子線噪音）"""
+        summary = {}
+
+        for interval in ["15m", "1h", "4h"]:
+            candles = klines.get(interval, [])
+            if len(candles) < 10:
+                continue
+
+            closes = [c["close"] for c in candles]
+            recent_closes = closes[-10:]  # 最近 10 根
+
+            # 收盤價方向：最近 10 根中漲 vs 跌的比例
+            ups = sum(1 for i in range(1, len(recent_closes)) if recent_closes[i] > recent_closes[i - 1])
+            downs = len(recent_closes) - 1 - ups
+            if ups > downs + 2:
+                direction = "bullish"
+            elif downs > ups + 2:
+                direction = "bearish"
+            else:
+                direction = "sideways"
+
+            # 收盤價變化幅度
+            pct_change = (recent_closes[-1] - recent_closes[0]) / recent_closes[0] * 100
+
+            # 最近 3 根收盤價（最重要的即時趨勢）
+            last_3 = recent_closes[-3:]
+            if last_3[-1] > last_3[-2] > last_3[-3]:
+                momentum = "accelerating_up"
+            elif last_3[-1] < last_3[-2] < last_3[-3]:
+                momentum = "accelerating_down"
+            elif last_3[-1] > last_3[-2]:
+                momentum = "turning_up"
+            elif last_3[-1] < last_3[-2]:
+                momentum = "turning_down"
+            else:
+                momentum = "flat"
+
+            # 收盤價的支撐/壓力位（基於收盤價，非影子線）
+            sorted_closes = sorted(closes[-30:])
+            support = round(sorted_closes[2], 2)   # 低位第 3 根收盤價
+            resistance = round(sorted_closes[-3], 2)  # 高位第 3 根收盤價
+
+            summary[interval] = {
+                "direction": direction,
+                "momentum": momentum,
+                "change_pct": round(pct_change, 3),
+                "current_close": round(recent_closes[-1], 2),
+                "close_support": support,
+                "close_resistance": resistance,
+                "recent_3_closes": [round(c, 2) for c in last_3],
+            }
+
+        return summary
+
+    def _calc_15m_indicators(self, klines: dict) -> dict:
+        """計算 15m 技術指標（基於收盤價）"""
+        candles = klines.get("15m", [])
+        if len(candles) < 30:
+            return {}
+
+        closes = np.array([c["close"] for c in candles])
+        indicators = {}
+
+        indicators["RSI_14"] = self._calc_rsi(closes, 14)
+
+        macd, signal, hist = self._calc_macd(closes)
+        if hist[-1] > 0 and hist[-2] <= 0:
+            indicators["MACD"] = "bullish_cross"
+        elif hist[-1] < 0 and hist[-2] >= 0:
+            indicators["MACD"] = "bearish_cross"
+        elif hist[-1] > 0:
+            indicators["MACD"] = "bullish"
+        else:
+            indicators["MACD"] = "bearish"
+
+        indicators["EMA_7"] = round(float(self._calc_ema(closes, 7)), 2)
+        indicators["EMA_25"] = round(float(self._calc_ema(closes, 25)), 2)
+
+        if indicators["EMA_7"] > indicators["EMA_25"]:
+            indicators["trend"] = "bullish"
         elif indicators["EMA_7"] < indicators["EMA_25"]:
             indicators["trend"] = "bearish"
         else:
