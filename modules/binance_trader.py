@@ -302,6 +302,59 @@ class BinanceTrader:
             except Exception as e:
                 logger.warning("Failed to set TP: %s", e)
 
+    def resync_sl_tp(self, trade_id: int) -> dict:
+        """重新設定指定交易的 SL/TP 掛單（修復遺失的掛單）"""
+        trade = self.db.get_trade(trade_id)
+        if not trade:
+            return {"success": False, "error": "Trade not found"}
+        if trade.status == "CLOSED":
+            return {"success": False, "error": "Trade already closed"}
+
+        symbol = trade.symbol
+        direction = trade.direction
+
+        try:
+            # 1. 取消該交易對所有掛單
+            try:
+                self._futures_delete("/fapi/v1/allOpenOrders", {"symbol": symbol})
+                logger.info("Cancelled existing orders for %s", symbol)
+            except Exception as e:
+                logger.warning("Failed to cancel existing orders: %s", e)
+
+            # 2. 查詢實際持倉數量
+            positions = self._futures_get("/fapi/v2/positionRisk", signed=True)
+            pos_qty = 0
+            for pos in positions:
+                if pos["symbol"] == symbol:
+                    pos_qty = abs(float(pos["positionAmt"]))
+                    break
+
+            if pos_qty <= 0:
+                return {"success": False, "error": f"No position found on Binance for {symbol}"}
+
+            # 3. 解析 TP
+            tp = trade.take_profit
+            if isinstance(tp, str):
+                tp = json.loads(tp)
+
+            # 4. 重新掛 SL/TP
+            self._set_sl_tp(symbol, direction, pos_qty, trade.stop_loss, tp or [])
+
+            logger.info("Resynced SL/TP for trade #%d: SL=%s TP=%s qty=%s",
+                        trade_id, trade.stop_loss, tp, pos_qty)
+
+            return {
+                "success": True,
+                "trade_id": trade_id,
+                "stop_loss": trade.stop_loss,
+                "take_profit": tp,
+                "quantity": pos_qty,
+            }
+
+        except Exception as e:
+            logger.error("Failed to resync SL/TP for trade #%d: %s", trade_id, e)
+            return {"success": False, "error": str(e)}
+
     def adjust_trade(self, trade_id: int, new_stop_loss: float | None = None,
                      new_take_profit: list[float] | None = None) -> dict:
         """根據 AI 決策調整現有持倉的止盈止損"""

@@ -51,6 +51,7 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("pnl", self._cmd_pnl))
         self._app.add_handler(CommandHandler("close", self._cmd_close))
         self._app.add_handler(CommandHandler("close_all", self._cmd_close_all))
+        self._app.add_handler(CommandHandler("fix_tp", self._cmd_fix_tp))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._text_handler)
         )
@@ -570,6 +571,7 @@ class TelegramNotifier:
             "/test_trade - 執行測試交易\n"
             "/close <id> - 平倉指定交易\n"
             "/close_all - 平掉所有持倉\n"
+            "/fix_tp [id] - 重設止盈止損掛單\n"
             "/stop - 緊急停止\n"
             "/help - 顯示此說明\n"
         )
@@ -855,6 +857,62 @@ class TelegramNotifier:
                 )
 
         text = "✅ 全部平倉完成\n\n" + "\n".join(results)
+        await update.message.reply_text(text)
+
+    async def _cmd_fix_tp(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """重設止盈止損掛單: /fix_tp [trade_id] (不填=全部持倉)"""
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._trader or not self._db:
+            await update.message.reply_text("❌ 模組未初始化")
+            return
+
+        # 決定要修復哪些交易
+        if context.args:
+            try:
+                trade_id = int(context.args[0])
+            except ValueError:
+                await update.message.reply_text("用法: /fix_tp [交易ID]\n不填 ID 則修復所有持倉")
+                return
+
+            trade = self._db.get_trade(trade_id)
+            if not trade:
+                await update.message.reply_text(f"❌ 找不到交易 #{trade_id}")
+                return
+            if trade.status == "CLOSED":
+                await update.message.reply_text(f"❌ 交易 #{trade_id} 已平倉")
+                return
+            trades_to_fix = [trade]
+        else:
+            trades_to_fix = self._db.get_open_trades()
+
+        if not trades_to_fix:
+            await update.message.reply_text("📊 目前沒有持倉需要修復")
+            return
+
+        await update.message.reply_text(
+            f"🔧 正在重設 {len(trades_to_fix)} 筆交易的止盈止損..."
+        )
+
+        results = []
+        for t in trades_to_fix:
+            tp_list = json.loads(t.take_profit) if isinstance(t.take_profit, str) and t.take_profit else []
+            result = self._trader.resync_sl_tp(t.id)
+            if result.get("success"):
+                tp_str = ", ".join(format_price(p) for p in tp_list) if tp_list else "N/A"
+                results.append(
+                    f"✅ #{t.id} {t.direction} {t.symbol}\n"
+                    f"   SL: {format_price(t.stop_loss)}\n"
+                    f"   TP: {tp_str}\n"
+                    f"   數量: {result.get('quantity', '?')}"
+                )
+            else:
+                results.append(
+                    f"❌ #{t.id} {t.symbol}: {result.get('error', 'Failed')}"
+                )
+
+        text = "🔧 止盈止損重設完成\n\n" + "\n\n".join(results)
         await update.message.reply_text(text)
 
     # ── 工具方法 ──
