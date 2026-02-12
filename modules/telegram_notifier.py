@@ -1,7 +1,9 @@
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 
+import requests
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes,
@@ -12,10 +14,14 @@ from utils.helpers import format_price, format_pct
 
 logger = logging.getLogger(__name__)
 
+MARKET_DATA_URL = "https://data-api.binance.vision"
+
 
 class TelegramNotifier:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, db=None, trader=None):
         self.config = config
+        self._db = db
+        self._trader = trader
         tg_cfg = config.get("telegram", {})
         self.bot_token = tg_cfg.get("bot_token", "")
         self.chat_id = tg_cfg.get("chat_id", "")
@@ -30,7 +36,7 @@ class TelegramNotifier:
         logger.info("TelegramNotifier initialized")
 
     async def start(self):
-        """啟動 Telegram Bot（不持續輪詢，僅在交易確認時短暫啟動）"""
+        """啟動 Telegram Bot（持續輪詢，隨時接收指令）"""
         self._app = (
             Application.builder()
             .token(self.bot_token)
@@ -39,17 +45,23 @@ class TelegramNotifier:
         self._app.add_handler(CallbackQueryHandler(self._button_callback))
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("stop", self._cmd_stop))
+        self._app.add_handler(CommandHandler("help", self._cmd_help))
+        self._app.add_handler(CommandHandler("test_trade", self._cmd_test_trade))
+        self._app.add_handler(CommandHandler("positions", self._cmd_positions))
+        self._app.add_handler(CommandHandler("pnl", self._cmd_pnl))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._text_handler)
         )
 
         await self._app.initialize()
         await self._app.start()
-        # 不再持續 polling，只在 send_signal() 的倒數期間短暫啟動
-        logger.info("Telegram bot started")
+        await self._app.updater.start_polling(drop_pending_updates=True)
+        logger.info("Telegram bot started with persistent polling")
 
     async def stop(self):
         if self._app:
+            if self._app.updater and self._app.updater.running:
+                await self._app.updater.stop()
             await self._app.stop()
             await self._app.shutdown()
 
@@ -137,37 +149,25 @@ class TelegramNotifier:
         cancel_event = asyncio.Event()
         self._cancel_callbacks[msg_id] = cancel_event
 
-        # 啟動短暫 polling 接收按鈕回調
-        try:
-            await self._app.updater.start_polling()
-        except Exception as e:
-            logger.error("Telegram polling start failed: %s", e)
-        logger.info("Polling started for trade confirmation (msg_id=%s)", msg_id)
+        logger.info("Waiting for trade confirmation (msg_id=%s, countdown=%ds)", msg_id, countdown)
 
-        # 倒數計時
+        # 倒數計時（polling 已持續運行，不需要額外啟動）
         execute_now = False
         cancelled = False
-
         cancel_reason = ""
 
-        try:
-            for remaining in range(countdown, 0, -5):
-                if cancel_event.is_set():
-                    # 檢查是取消還是立即執行
-                    if self._pending_decisions.get(msg_id, {}).get("_execute_now"):
-                        execute_now = True
-                    else:
-                        cancelled = True
-                    break
-                await asyncio.sleep(min(5, remaining))
+        for remaining in range(countdown, 0, -5):
+            if cancel_event.is_set():
+                # 檢查是取消還是立即執行
+                if self._pending_decisions.get(msg_id, {}).get("_execute_now"):
+                    execute_now = True
+                else:
+                    cancelled = True
+                break
+            await asyncio.sleep(min(5, remaining))
 
-            # 如果取消，在 polling 仍啟動時詢問原因
-            if cancelled:
-                cancel_reason = await self._ask_cancel_reason()
-        finally:
-            # 停止 polling
-            await self._app.updater.stop()
-            logger.info("Polling stopped after trade confirmation")
+        if cancelled:
+            cancel_reason = await self._ask_cancel_reason()
 
         # 清理
         self._pending_decisions.pop(msg_id, None)
@@ -527,11 +527,200 @@ class TelegramNotifier:
                 return
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("🤖 系統運行中\n使用 /stop 緊急停止")
+        open_count = len(self._db.get_open_trades()) if self._db else 0
+        text = (
+            "🤖 系統運行中\n\n"
+            f"持倉: {open_count} 筆\n"
+            "使用 /help 查看所有指令"
+        )
+        await update.message.reply_text(text)
 
     async def _cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🛑 緊急停止指令已接收")
         # 主程式會偵測到這個事件
+
+    async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = (
+            "🤖 AI 交易系統指令\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "/status - 系統狀態\n"
+            "/positions - 查看當前持倉\n"
+            "/pnl - 查看績效總覽\n"
+            "/test_trade - 執行測試交易\n"
+            "/stop - 緊急停止\n"
+            "/help - 顯示此說明\n"
+        )
+        await update.message.reply_text(text)
+
+    async def _cmd_test_trade(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """測試交易 - 在 Binance Testnet 下一筆小額測試單"""
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._trader:
+            await update.message.reply_text("❌ 交易模組未初始化")
+            return
+
+        await update.message.reply_text("🧪 正在執行測試交易...\nLONG BTCUSDT (1% 倉位)")
+
+        try:
+            # 取得當前 BTC 價格
+            r = requests.get(
+                f"{MARKET_DATA_URL}/api/v3/ticker/price",
+                params={"symbol": "BTCUSDT"}, timeout=10,
+            )
+            price = float(r.json()["price"])
+
+            # 建立測試決策（MARKET 單，1% 倉位）
+            decision = {
+                "action": "LONG",
+                "symbol": "BTCUSDT",
+                "confidence": 85,
+                "entry": {"price": price, "strategy": "MARKET"},
+                "stop_loss": round(price * 0.98, 2),
+                "take_profit": [round(price * 1.02, 2), round(price * 1.04, 2)],
+                "risk_reward": 2.0,
+                "position_size": 1.0,
+                "reasoning": {
+                    "analyst_consensus": "系統測試交易",
+                    "technical": "測試流程驗證",
+                    "sentiment": "N/A",
+                },
+                "risk_assessment": {
+                    "max_loss_pct": 2.0,
+                    "expected_profit_pct": [2.0, 4.0],
+                    "win_probability": 0.5,
+                },
+                "_analyst_messages": [],
+            }
+
+            # 執行交易
+            trade_result = self._trader.execute_trade(decision)
+
+            if trade_result.get("success"):
+                # 記錄到資料庫
+                if self._db:
+                    self._db.save_ai_decision(
+                        decision, outcome="EXECUTED",
+                        analyst_names=["TEST"],
+                        trade_id=trade_result["trade_id"],
+                    )
+
+                # 發送進場通知
+                await self.send_entry_confirmation(trade_result)
+
+                await self.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(
+                        f"✅ 測試交易成功！\n\n"
+                        f"交易 #{trade_result['trade_id']}\n"
+                        f"LONG BTCUSDT @ {format_price(price)}\n"
+                        f"數量: {trade_result['quantity']}\n\n"
+                        f"使用 /positions 查看持倉\n"
+                        f"使用 /pnl 查看績效"
+                    ),
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ 測試交易失敗:\n{trade_result.get('error', 'Unknown')}"
+                )
+
+        except Exception as e:
+            logger.exception("Test trade error")
+            await update.message.reply_text(f"❌ 測試交易錯誤: {e}")
+
+    async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """查看當前持倉"""
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._db:
+            await update.message.reply_text("❌ 資料庫未初始化")
+            return
+
+        open_trades = self._db.get_open_trades()
+
+        if not open_trades:
+            await update.message.reply_text("📊 目前沒有持倉")
+            return
+
+        text = f"📊 當前持倉 ({len(open_trades)} 筆)\n{'=' * 25}\n\n"
+
+        for t in open_trades:
+            # 取得當前價格計算未實現盈虧
+            try:
+                r = requests.get(
+                    f"{MARKET_DATA_URL}/api/v3/ticker/price",
+                    params={"symbol": t.symbol}, timeout=10,
+                )
+                current_price = float(r.json()["price"])
+                leverage = t.leverage or 1
+
+                if t.direction == "LONG":
+                    pnl_pct = (current_price - t.entry_price) / t.entry_price * 100 * leverage
+                else:
+                    pnl_pct = (t.entry_price - current_price) / t.entry_price * 100 * leverage
+
+                pnl_icon = "🟢" if pnl_pct >= 0 else "🔴"
+            except Exception:
+                current_price = 0
+                pnl_pct = 0
+                pnl_icon = "⚪"
+
+            direction_icon = "🟢" if t.direction == "LONG" else "🔴"
+            tp_list = json.loads(t.take_profit) if isinstance(t.take_profit, str) and t.take_profit else []
+
+            text += (
+                f"{direction_icon} #{t.id} | {t.direction} {t.symbol}\n"
+                f"  槓桿: {t.leverage}x\n"
+                f"  進場: {format_price(t.entry_price)}\n"
+                f"  現價: {format_price(current_price)}\n"
+                f"  {pnl_icon} 未實現: {pnl_pct:+.2f}%\n"
+                f"  停損: {format_price(t.stop_loss)}\n"
+                f"  目標: {', '.join(format_price(p) for p in tp_list) if tp_list else 'N/A'}\n"
+                f"  倉位: {t.position_size}%\n"
+                f"━━━━━━━━━━━━━━━\n"
+            )
+
+        await update.message.reply_text(text)
+
+    async def _cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """查看績效總覽"""
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._db:
+            await update.message.reply_text("❌ 資料庫未初始化")
+            return
+
+        stats = self._db.get_performance_stats()
+        today_pnl = self._db.get_today_pnl()
+        today_trades = self._db.get_today_trades()
+        open_trades = self._db.get_open_trades()
+
+        text = (
+            f"{'=' * 25}\n"
+            f"📈 績效總覽\n"
+            f"{'=' * 25}\n\n"
+            f"📊 總績效\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"總交易: {stats['total']} 筆\n"
+            f"勝: {stats['wins']} | 負: {stats['losses']}\n"
+            f"勝率: {stats['win_rate']:.1f}%\n"
+            f"總盈虧: {format_pct(stats['total_profit_pct'])}\n"
+            f"平均盈虧: {format_pct(stats['avg_profit_pct'])}\n"
+            f"最大回撤: {stats['max_drawdown']:.2f}%\n\n"
+            f"📅 今日\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"今日交易: {len(today_trades)} 筆\n"
+            f"今日盈虧: {format_pct(today_pnl)}\n\n"
+            f"📦 持倉: {len(open_trades)} 筆\n"
+        )
+
+        if open_trades:
+            text += "\n使用 /positions 查看持倉詳情\n"
+
+        await update.message.reply_text(text)
 
     # ── 工具方法 ──
 

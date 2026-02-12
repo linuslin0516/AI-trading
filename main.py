@@ -54,7 +54,7 @@ class TradingBot:
             self.config, self.db, self.market, self.ai, self.risk, self.calendar
         )
         self.trader = BinanceTrader(self.config, self.db)
-        self.telegram = TelegramNotifier(self.config)
+        self.telegram = TelegramNotifier(self.config, db=self.db, trader=self.trader)
         self.learning = LearningEngine(self.config, self.db, self.ai, self.risk)
         self.discord = DiscordListener(self.config)
 
