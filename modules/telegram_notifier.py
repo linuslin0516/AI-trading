@@ -113,11 +113,24 @@ class TelegramNotifier:
             ]
         ])
 
-        msg = await self.bot.send_message(
-            chat_id=self.chat_id,
-            text=text,
-            reply_markup=keyboard,
-        )
+        logger.info("Sending trade signal to Telegram (chat_id=%s)...", self.chat_id)
+        try:
+            msg = await asyncio.wait_for(
+                self.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=text,
+                    reply_markup=keyboard,
+                ),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Telegram send_message timed out after 30s")
+            return {"executed": True, "cancelled": False}
+        except Exception as e:
+            logger.error("Telegram send_message failed: %s", e)
+            return {"executed": True, "cancelled": False}
+
+        logger.info("Signal sent to Telegram (msg_id=%s)", msg.message_id)
 
         msg_id = str(msg.message_id)
         self._pending_decisions[msg_id] = decision
@@ -125,7 +138,10 @@ class TelegramNotifier:
         self._cancel_callbacks[msg_id] = cancel_event
 
         # 啟動短暫 polling 接收按鈕回調
-        await self._app.updater.start_polling()
+        try:
+            await self._app.updater.start_polling()
+        except Exception as e:
+            logger.error("Telegram polling start failed: %s", e)
         logger.info("Polling started for trade confirmation (msg_id=%s)", msg_id)
 
         # 倒數計時
