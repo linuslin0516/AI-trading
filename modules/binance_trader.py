@@ -345,7 +345,39 @@ class BinanceTrader:
         direction = trade.direction
 
         try:
-            # 取得當前價格
+            # 1. 取消該交易對所有掛單（SL/TP）
+            try:
+                self._futures_delete("/fapi/v1/allOpenOrders", {"symbol": symbol})
+                logger.info("Cancelled all open orders for %s", symbol)
+            except Exception as e:
+                logger.warning("Failed to cancel open orders: %s", e)
+
+            # 2. 市價平倉
+            close_side = "SELL" if direction == "LONG" else "BUY"
+            try:
+                # 查詢實際持倉數量
+                positions = self._futures_get("/fapi/v2/positionRisk", signed=True)
+                pos_qty = 0
+                for pos in positions:
+                    if pos["symbol"] == symbol:
+                        pos_qty = abs(float(pos["positionAmt"]))
+                        break
+
+                if pos_qty > 0:
+                    self._futures_post("/fapi/v1/order", {
+                        "symbol": symbol,
+                        "side": close_side,
+                        "type": "MARKET",
+                        "quantity": pos_qty,
+                        "reduceOnly": "true",
+                    })
+                    logger.info("Closed position: %s %s qty=%s", close_side, symbol, pos_qty)
+                else:
+                    logger.info("No Binance position found for %s, updating DB only", symbol)
+            except Exception as e:
+                logger.warning("Market close order failed: %s (updating DB anyway)", e)
+
+            # 3. 取得成交後的價格
             if not exit_price:
                 r = self.session.get(
                     f"{MARKET_DATA_URL}/api/v3/ticker/price",
