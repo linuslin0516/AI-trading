@@ -72,6 +72,17 @@ class TradingBot:
         """啟動所有服務"""
         logger.info("Starting all services...")
 
+        # 啟動時印出 data 目錄內容（方便確認 volume 掛載）
+        import os
+        data_dir = os.path.dirname(self.config.get("database", {}).get("path", "./data/trades.db"))
+        abs_data = os.path.abspath(data_dir)
+        if os.path.isdir(abs_data):
+            files = os.listdir(abs_data)
+            sizes = {f: os.path.getsize(os.path.join(abs_data, f)) for f in files}
+            logger.info("Data directory [%s]: %s", abs_data, sizes)
+        else:
+            logger.warning("Data directory [%s] does NOT exist!", abs_data)
+
         # 載入分析師最新權重
         self._sync_analyst_weights()
 
