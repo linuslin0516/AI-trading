@@ -36,6 +36,11 @@ discord:
       analyst: "VIVI-ETH"
       initial_weight: 1.0
 
+    - id: "1113106196510035998"
+      name: "VIVI短線交易"
+      analyst: "VIVI-短線"
+      initial_weight: 1.0
+
 
 # Claude AI 設定
 claude:
@@ -76,20 +81,22 @@ trading:
     ETHUSDT: 25
   default_leverage: 25
 
-  # 初始參數（AI 會自動優化）
-  min_confidence: 75
-  min_risk_reward: 2.0
+  # 短線高頻參數
+  min_confidence: 60           # 降低信心門檻，讓 AI 更積極進場
+  min_risk_reward: 1.5         # 短線交易 RR 1.5 即可
   max_position_size: 5.0       # 每筆固定 5% 倉位
   max_positions: 2             # 最多同時持 2 倉（BTC + ETH 各一）
-  max_daily_trades: 5          # 每天最多 5 單（高槓桿可能會觸發更多 SL/重新進場）
-  max_daily_loss: 15.0         # 每日最大虧損 15%（50x BTC 一單 SL≈2.5%，允許多次嘗試）
+  max_daily_trades: 20         # 短線高頻，不限制次數（贏就繼續開）
+  max_daily_loss: 15.0         # 每日最大虧損 15%
+  max_consecutive_losses: 3    # 連輸 3 次當日停止交易
+  confirmation_delay: 15       # 確認時間縮短到 15 秒（快進快出）
 
 # 風控硬限制（AI 無法修改）
 risk_limits:
   absolute_max_position: 5.0   # 單筆倉位不超過 5%
   absolute_max_daily_loss: 20.0  # 日虧硬上限 20%（超過直接停止）
   emergency_stop_loss: 40.0    # 總帳戶虧 40% 緊急停止一切交易
-  cooldown_minutes: 15         # 冷卻縮短到 15 分鐘（高槓桿行情變化快）
+  cooldown_minutes: 5          # 冷卻縮短到 5 分鐘（短線需要快速反應）
 
 # 定時報告設定
 schedule:

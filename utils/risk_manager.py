@@ -39,6 +39,7 @@ class RiskManager:
         self.max_positions = trading.get("max_positions", 2)
         self.max_daily_trades = trading.get("max_daily_trades", 5)
         self.max_daily_loss = trading.get("max_daily_loss", 15.0)
+        self.max_consecutive_losses = trading.get("max_consecutive_losses", 3)
         self.allowed_symbols = trading.get("allowed_symbols", [])
 
         # 硬限制（不可修改）
@@ -106,7 +107,17 @@ class RiskManager:
             f"{today_pnl:+.2f}% (上限 -{effective_max_loss}%)",
         )
 
-        # 6. 總虧損緊急停止
+        # 6.5 連續虧損檢查（連輸 N 次當日停止）
+        consecutive_losses = self.db.get_today_consecutive_losses()
+        result.add_check(
+            "連續虧損",
+            consecutive_losses < self.max_consecutive_losses,
+            f"連輸 {consecutive_losses} 次 (上限 {self.max_consecutive_losses})"
+            if consecutive_losses >= self.max_consecutive_losses
+            else f"連輸 {consecutive_losses} 次，尚可交易",
+        )
+
+        # 7. 總虧損緊急停止
         stats = self.db.get_performance_stats()
         total_pnl = stats.get("total_profit_pct", 0)
         result.add_check(

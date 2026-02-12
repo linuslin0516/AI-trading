@@ -455,3 +455,23 @@ class Database:
     def get_today_pnl(self) -> float:
         trades = self.get_today_trades()
         return sum(t.profit_pct or 0 for t in trades if t.status == "CLOSED")
+
+    def get_today_consecutive_losses(self) -> int:
+        """計算今日從最近一筆往回數的連續虧損次數"""
+        today_start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        with self.get_session() as s:
+            trades = (s.query(Trade)
+                      .filter(Trade.timestamp >= today_start,
+                              Trade.status == "CLOSED")
+                      .order_by(Trade.timestamp.desc())
+                      .all())
+
+        consecutive = 0
+        for t in trades:
+            if t.outcome == "LOSS":
+                consecutive += 1
+            else:
+                break  # 遇到非虧損就停止計算
+        return consecutive
