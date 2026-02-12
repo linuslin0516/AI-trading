@@ -551,58 +551,172 @@ class BinanceTrader:
             return {"success": False, "error": str(e)}
 
     async def monitor_positions(self, callback=None):
-        """持續監控持倉（每 30 秒更新）"""
+        """持續監控持倉（每 30 秒更新）
+
+        透過查詢 Binance 實際持倉偵測：
+        - 持倉歸零 → SL 或 TP2 已在交易所觸發
+        - 持倉數量減少 ~50% → TP1 部分止盈已觸發
+        - Binance 查詢失敗時 → 回退到本地價格檢查
+        """
         logger.info("Position monitor started")
+
+        # 追蹤每筆交易的初始數量和 TP1 通知狀態
+        _pos_state: dict[int, dict] = {}
+
         while True:
             try:
                 open_trades = self.db.get_open_trades()
+                if not open_trades:
+                    _pos_state.clear()
+                    await asyncio.sleep(30)
+                    continue
+
+                # 批次查詢 Binance 所有持倉（一次 API 呼叫）
+                binance_positions: dict[str, dict] = {}
+                binance_ok = False
+                try:
+                    raw_positions = self._futures_get(
+                        "/fapi/v2/positionRisk", signed=True
+                    )
+                    for pos in raw_positions:
+                        sym = pos["symbol"]
+                        binance_positions[sym] = {
+                            "qty": abs(float(pos["positionAmt"])),
+                            "mark_price": float(pos.get("markPrice", 0)),
+                        }
+                    binance_ok = True
+                except Exception as e:
+                    logger.warning("Failed to query Binance positions: %s", e)
+
                 for trade in open_trades:
                     try:
-                        r = self.session.get(
-                            f"{MARKET_DATA_URL}/api/v3/ticker/price",
-                            params={"symbol": trade.symbol}, timeout=10,
-                        )
-                        current_price = float(r.json()["price"])
+                        symbol = trade.symbol
 
-                        # 計算未實現盈虧（含預估手續費）
-                        leverage = self.leverage_map.get(trade.symbol, self.default_leverage)
+                        # 取得當前價格（優先用 Binance mark price）
+                        bp = binance_positions.get(symbol, {})
+                        current_price = bp.get("mark_price", 0)
+                        if not current_price:
+                            r = self.session.get(
+                                f"{MARKET_DATA_URL}/api/v3/ticker/price",
+                                params={"symbol": symbol}, timeout=10,
+                            )
+                            current_price = float(r.json()["price"])
+
+                        actual_qty = bp.get("qty", -1)  # -1 = 查詢失敗
+
+                        # 初始化追蹤狀態
+                        if trade.id not in _pos_state:
+                            _pos_state[trade.id] = {
+                                "initial_qty": actual_qty if actual_qty > 0 else None,
+                                "tp1_notified": False,
+                            }
+                        state = _pos_state[trade.id]
+
+                        # 補記初始數量（首次查到持倉時）
+                        if state["initial_qty"] is None and actual_qty > 0:
+                            state["initial_qty"] = actual_qty
+
+                        # ── Case A: Binance 持倉已完全平倉 ──
+                        if (binance_ok and actual_qty == 0
+                                and state["initial_qty"] is not None
+                                and state["initial_qty"] > 0):
+                            tp_list = (
+                                json.loads(trade.take_profit)
+                                if isinstance(trade.take_profit, str)
+                                else trade.take_profit
+                            ) or []
+
+                            # 判斷是 SL 還是 TP 觸發（依當前價格離哪邊近）
+                            if trade.direction == "LONG":
+                                near_sl = current_price <= trade.stop_loss * 1.005
+                            else:
+                                near_sl = current_price >= trade.stop_loss * 0.995
+
+                            event = "stop_loss" if near_sl else "take_profit"
+
+                            logger.warning(
+                                "Exchange closed trade #%d (%s %s), event=%s, price=%s",
+                                trade.id, trade.direction, symbol, event, current_price,
+                            )
+
+                            result = self.close_trade(trade.id, current_price)
+                            if callback:
+                                await callback(event, trade, result)
+
+                            _pos_state.pop(trade.id, None)
+                            continue
+
+                        # ── Case B: TP1 部分止盈偵測（數量減少 >30%）──
+                        if (actual_qty > 0
+                                and state["initial_qty"] is not None
+                                and not state["tp1_notified"]
+                                and actual_qty < state["initial_qty"] * 0.7):
+
+                            state["tp1_notified"] = True
+                            tp_list = (
+                                json.loads(trade.take_profit)
+                                if isinstance(trade.take_profit, str)
+                                else trade.take_profit
+                            ) or []
+
+                            logger.info(
+                                "TP1 partial close for trade #%d: qty %.6f -> %.6f",
+                                trade.id, state["initial_qty"], actual_qty,
+                            )
+
+                            if callback:
+                                await callback("tp1_hit", trade, {
+                                    "current_price": current_price,
+                                    "tp1_price": tp_list[0] if tp_list else 0,
+                                    "closed_qty": state["initial_qty"] - actual_qty,
+                                    "remaining_qty": actual_qty,
+                                })
+
+                        # ── Case C: 正常監控 + 計算未實現盈虧 ──
+                        leverage = self.leverage_map.get(symbol, self.default_leverage)
                         if trade.direction == "LONG":
                             unrealized = (current_price - trade.entry_price) / trade.entry_price * 100
                         else:
                             unrealized = (trade.entry_price - current_price) / trade.entry_price * 100
-
                         unrealized *= leverage
-
-                        # 扣除預估往返手續費
                         fee_pct = self.calc_fee_pct(leverage)
                         unrealized -= fee_pct
 
-                        # 檢查是否觸及停損
-                        if trade.direction == "LONG" and current_price <= trade.stop_loss:
-                            logger.warning("Stop loss hit for trade #%d", trade.id)
-                            result = self.close_trade(trade.id, current_price)
-                            if callback:
-                                await callback("stop_loss", trade, result)
+                        # Fallback: Binance 查詢失敗時用價格檢查 SL/TP
+                        if not binance_ok:
+                            if trade.direction == "LONG" and current_price <= trade.stop_loss:
+                                logger.warning("Stop loss hit for trade #%d (price fallback)", trade.id)
+                                result = self.close_trade(trade.id, current_price)
+                                if callback:
+                                    await callback("stop_loss", trade, result)
+                                _pos_state.pop(trade.id, None)
+                                continue
 
-                        elif trade.direction == "SHORT" and current_price >= trade.stop_loss:
-                            logger.warning("Stop loss hit for trade #%d", trade.id)
-                            result = self.close_trade(trade.id, current_price)
-                            if callback:
-                                await callback("stop_loss", trade, result)
+                            if trade.direction == "SHORT" and current_price >= trade.stop_loss:
+                                logger.warning("Stop loss hit for trade #%d (price fallback)", trade.id)
+                                result = self.close_trade(trade.id, current_price)
+                                if callback:
+                                    await callback("stop_loss", trade, result)
+                                _pos_state.pop(trade.id, None)
+                                continue
 
-                        # 檢查是否觸及停利
-                        elif trade.take_profit:
-                            tp_list = json.loads(trade.take_profit) if isinstance(trade.take_profit, str) else trade.take_profit
+                            tp_list = (
+                                json.loads(trade.take_profit)
+                                if isinstance(trade.take_profit, str)
+                                else trade.take_profit
+                            ) or []
                             if tp_list and (
                                 (trade.direction == "LONG" and current_price >= tp_list[-1]) or
                                 (trade.direction == "SHORT" and current_price <= tp_list[-1])
                             ):
-                                logger.info("Take profit hit for trade #%d", trade.id)
+                                logger.info("Take profit hit for trade #%d (price fallback)", trade.id)
                                 result = self.close_trade(trade.id, current_price)
                                 if callback:
                                     await callback("take_profit", trade, result)
+                                _pos_state.pop(trade.id, None)
+                                continue
 
-                        elif callback:
+                        if callback:
                             await callback("update", trade, {
                                 "current_price": current_price,
                                 "unrealized_pct": unrealized,
@@ -610,6 +724,12 @@ class BinanceTrader:
 
                     except Exception as e:
                         logger.warning("Monitor error for trade #%d: %s", trade.id, e)
+
+                # 清理已結束交易的追蹤記錄
+                active_ids = {t.id for t in open_trades}
+                for tid in list(_pos_state.keys()):
+                    if tid not in active_ids:
+                        _pos_state.pop(tid)
 
             except Exception as e:
                 logger.error("Position monitor error: %s", e)

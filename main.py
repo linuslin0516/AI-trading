@@ -284,6 +284,32 @@ class TradingBot:
 
     async def _on_position_event(self, event_type: str, trade, data: dict):
         """持倉監控回調"""
+        if event_type == "tp1_hit":
+            # TP1 部分止盈通知
+            tp1_price = data.get("tp1_price", 0)
+            closed_qty = data.get("closed_qty", 0)
+            remaining = data.get("remaining_qty", 0)
+            current = data.get("current_price", 0)
+
+            logger.info("TP1 hit for trade #%d %s", trade.id, trade.symbol)
+
+            text = (
+                f"🎯 TP1 止盈到達！\n\n"
+                f"#{trade.id} {trade.direction} {trade.symbol}\n"
+                f"目標 1 價格: {tp1_price}\n"
+                f"當前價格: {current}\n"
+                f"已平倉數量: {closed_qty}\n"
+                f"剩餘倉位: {remaining}\n\n"
+                f"繼續持有，等待目標 2 或止損..."
+            )
+            try:
+                await self.telegram.bot.send_message(
+                    chat_id=self.telegram.chat_id, text=text,
+                )
+            except Exception as e:
+                logger.warning("Failed to send TP1 notification: %s", e)
+            return
+
         if event_type in ("stop_loss", "take_profit"):
             logger.info(
                 "Position closed by %s: trade #%d",
