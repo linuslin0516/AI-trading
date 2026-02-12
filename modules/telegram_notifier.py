@@ -49,6 +49,8 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("test_trade", self._cmd_test_trade))
         self._app.add_handler(CommandHandler("positions", self._cmd_positions))
         self._app.add_handler(CommandHandler("pnl", self._cmd_pnl))
+        self._app.add_handler(CommandHandler("close", self._cmd_close))
+        self._app.add_handler(CommandHandler("close_all", self._cmd_close_all))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._text_handler)
         )
@@ -547,6 +549,8 @@ class TelegramNotifier:
             "/positions - 查看當前持倉\n"
             "/pnl - 查看績效總覽\n"
             "/test_trade - 執行測試交易\n"
+            "/close <id> - 平倉指定交易\n"
+            "/close_all - 平掉所有持倉\n"
             "/stop - 緊急停止\n"
             "/help - 顯示此說明\n"
         )
@@ -740,6 +744,89 @@ class TelegramNotifier:
         if open_trades:
             text += "\n使用 /positions 查看持倉詳情\n"
 
+        await update.message.reply_text(text)
+
+    async def _cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """平倉指定交易: /close <trade_id>"""
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._trader or not self._db:
+            await update.message.reply_text("❌ 模組未初始化")
+            return
+
+        if not context.args:
+            await update.message.reply_text("用法: /close <交易ID>\n例如: /close 1")
+            return
+
+        try:
+            trade_id = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("❌ 交易 ID 必須是數字")
+            return
+
+        trade = self._db.get_trade(trade_id)
+        if not trade:
+            await update.message.reply_text(f"❌ 找不到交易 #{trade_id}")
+            return
+        if trade.status == "CLOSED":
+            await update.message.reply_text(f"❌ 交易 #{trade_id} 已經平倉了")
+            return
+
+        await update.message.reply_text(f"⏳ 正在平倉 #{trade_id} {trade.direction} {trade.symbol}...")
+
+        result = self._trader.close_trade(trade_id)
+
+        if result.get("success"):
+            pnl = result.get("profit_pct", 0)
+            pnl_icon = "🟢" if pnl >= 0 else "🔴"
+            await update.message.reply_text(
+                f"✅ 交易 #{trade_id} 已平倉\n\n"
+                f"{trade.direction} {trade.symbol}\n"
+                f"進場: {format_price(trade.entry_price)}\n"
+                f"出場: {format_price(result.get('exit_price', 0))}\n"
+                f"{pnl_icon} 盈虧: {pnl:+.2f}%\n"
+                f"結果: {result.get('outcome', 'N/A')}"
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ 平倉失敗: {result.get('error', 'Unknown')}"
+            )
+
+    async def _cmd_close_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """平掉所有持倉"""
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._trader or not self._db:
+            await update.message.reply_text("❌ 模組未初始化")
+            return
+
+        open_trades = self._db.get_open_trades()
+
+        if not open_trades:
+            await update.message.reply_text("📊 目前沒有持倉可平")
+            return
+
+        await update.message.reply_text(
+            f"⏳ 正在平倉所有持倉 ({len(open_trades)} 筆)..."
+        )
+
+        results = []
+        for t in open_trades:
+            result = self._trader.close_trade(t.id)
+            if result.get("success"):
+                pnl = result.get("profit_pct", 0)
+                pnl_icon = "🟢" if pnl >= 0 else "🔴"
+                results.append(
+                    f"{pnl_icon} #{t.id} {t.direction} {t.symbol}: {pnl:+.2f}%"
+                )
+            else:
+                results.append(
+                    f"❌ #{t.id} {t.symbol}: {result.get('error', 'Failed')}"
+                )
+
+        text = "✅ 全部平倉完成\n\n" + "\n".join(results)
         await update.message.reply_text(text)
 
     # ── 工具方法 ──
