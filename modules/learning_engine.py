@@ -2,9 +2,13 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
+import requests
+
 from modules.ai_analyzer import AIAnalyzer
 from modules.database import Database
 from utils.risk_manager import RiskManager
+
+MAINNET_PRICE_URL = "https://data-api.binance.vision"
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +60,24 @@ class LearningEngine:
             return result
 
         logger.info("Learning pipeline for trade #%d", trade_id)
+
+        # 0. Testnet 價格偏差檢查：跟主網比對，偏差太大則跳過學習
+        deviation = self._check_price_deviation(trade)
+        if deviation is not None and abs(deviation) > 5.0:
+            logger.warning(
+                "Skipping learning for trade #%d: testnet price deviation %.1f%% "
+                "(exit=%.2f vs mainnet)",
+                trade_id, deviation, trade.exit_price,
+            )
+            result["events"].append({
+                "type": "LEARNING_SKIPPED",
+                "description": (
+                    f"⚠️ Trade #{trade.id} 學習已跳過\n"
+                    f"Testnet 出場價與主網偏差 {deviation:+.1f}%，"
+                    f"結果不可靠，避免錯誤學習"
+                ),
+            })
+            return result
 
         # 1. AI 覆盤
         review = self._run_review(trade)
@@ -109,6 +131,31 @@ class LearningEngine:
                     })
 
         return result
+
+    def _check_price_deviation(self, trade) -> float | None:
+        """比對 testnet exit price 與主網當前價格的偏差百分比
+
+        Returns:
+            偏差百分比（正=testnet 偏高, 負=testnet 偏低）, None=無法比對
+        """
+        try:
+            r = requests.get(
+                f"{MAINNET_PRICE_URL}/api/v3/ticker/price",
+                params={"symbol": trade.symbol}, timeout=5,
+            )
+            mainnet_price = float(r.json()["price"])
+            if mainnet_price <= 0 or not trade.exit_price:
+                return None
+
+            deviation = (trade.exit_price - mainnet_price) / mainnet_price * 100
+            logger.info(
+                "Price deviation for %s: testnet_exit=%.2f, mainnet=%.2f, dev=%.1f%%",
+                trade.symbol, trade.exit_price, mainnet_price, deviation,
+            )
+            return deviation
+        except Exception as e:
+            logger.warning("Failed to check price deviation: %s", e)
+            return None
 
     def _run_review(self, trade) -> dict | None:
         """調用 AI 進行覆盤"""
