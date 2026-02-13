@@ -89,6 +89,7 @@ class TradingBot:
         # 啟動 Telegram
         try:
             await self.telegram.start()
+            self.telegram._briefing_callback = self.generate_and_send_briefing
             logger.info("Telegram bot started")
         except Exception as e:
             logger.error("Telegram start failed: %s", e)
@@ -635,6 +636,68 @@ class TradingBot:
             target += timedelta(days=1)
         return (target - now).total_seconds()
 
+    async def generate_and_send_briefing(self):
+        """產生並發送早報（供定時任務和手動指令共用）"""
+        logger.info("Generating morning briefing...")
+
+        # 1. 取得過去 24 小時分析師訊息
+        recent_msgs = self.db.get_recent_analyst_messages(hours=24)
+        analyst_msgs = [
+            {
+                "analyst": m.analyst_name,
+                "content": m.content,
+                "timestamp": m.timestamp.strftime("%m-%d %H:%M"),
+            }
+            for m in recent_msgs
+        ]
+
+        # 2. 取得市場數據
+        market_data = {}
+        for symbol in self.config["binance"].get("symbols", ["BTCUSDT"]):
+            data = self.market.get_symbol_data(symbol)
+            if "error" not in data:
+                market_data[symbol] = data
+
+        # 3. 取得持倉
+        open_trades = self.db.get_open_trades()
+        open_trades_info = [
+            {
+                "trade_id": t.id,
+                "symbol": t.symbol,
+                "direction": t.direction,
+                "entry_price": t.entry_price,
+                "stop_loss": t.stop_loss,
+                "take_profit": json.loads(t.take_profit) if isinstance(t.take_profit, str) else t.take_profit,
+            }
+            for t in open_trades
+        ] if open_trades else None
+
+        # 4. 績效統計
+        performance = self.db.get_performance_stats()
+
+        # 5. 過去 24 小時 AI 決策記錄
+        recent_decisions = self._format_decisions(
+            self.db.get_recent_decisions(hours=24)
+        )
+
+        # 5.5 今日經濟日曆
+        econ_events = self.calendar.get_events(days_ahead=2)
+        econ_text = self.calendar.format_for_ai(econ_events)
+
+        # 6. AI 產出早報
+        briefing = self.ai.generate_morning_briefing(
+            analyst_messages=analyst_msgs,
+            market_data=market_data,
+            open_trades=open_trades_info,
+            performance_stats=performance,
+            recent_decisions=recent_decisions,
+            economic_events=econ_text,
+        )
+
+        # 7. 發送 Telegram
+        await self.telegram.send_morning_briefing(briefing)
+        logger.info("Morning briefing sent")
+
     async def _morning_briefing_loop(self):
         """每日 8:00 AM 發送早報"""
         morning_hour = self.config.get("schedule", {}).get("morning_hour", 8)
@@ -649,65 +712,7 @@ class TradingBot:
                 if not self._running:
                     break
 
-                logger.info("Generating morning briefing...")
-
-                # 1. 取得過去 24 小時分析師訊息
-                recent_msgs = self.db.get_recent_analyst_messages(hours=24)
-                analyst_msgs = [
-                    {
-                        "analyst": m.analyst_name,
-                        "content": m.content,
-                        "timestamp": m.timestamp.strftime("%m-%d %H:%M"),
-                    }
-                    for m in recent_msgs
-                ]
-
-                # 2. 取得市場數據
-                market_data = {}
-                for symbol in self.config["binance"].get("symbols", ["BTCUSDT"]):
-                    data = self.market.get_symbol_data(symbol)
-                    if "error" not in data:
-                        market_data[symbol] = data
-
-                # 3. 取得持倉
-                open_trades = self.db.get_open_trades()
-                open_trades_info = [
-                    {
-                        "trade_id": t.id,
-                        "symbol": t.symbol,
-                        "direction": t.direction,
-                        "entry_price": t.entry_price,
-                        "stop_loss": t.stop_loss,
-                        "take_profit": json.loads(t.take_profit) if isinstance(t.take_profit, str) else t.take_profit,
-                    }
-                    for t in open_trades
-                ] if open_trades else None
-
-                # 4. 績效統計
-                performance = self.db.get_performance_stats()
-
-                # 5. 過去 24 小時 AI 決策記錄
-                recent_decisions = self._format_decisions(
-                    self.db.get_recent_decisions(hours=24)
-                )
-
-                # 5.5 今日經濟日曆
-                econ_events = self.calendar.get_events(days_ahead=2)
-                econ_text = self.calendar.format_for_ai(econ_events)
-
-                # 6. AI 產出早報
-                briefing = self.ai.generate_morning_briefing(
-                    analyst_messages=analyst_msgs,
-                    market_data=market_data,
-                    open_trades=open_trades_info,
-                    performance_stats=performance,
-                    recent_decisions=recent_decisions,
-                    economic_events=econ_text,
-                )
-
-                # 6. 發送 Telegram
-                await self.telegram.send_morning_briefing(briefing)
-                logger.info("Morning briefing sent")
+                await self.generate_and_send_briefing()
 
             except asyncio.CancelledError:
                 break

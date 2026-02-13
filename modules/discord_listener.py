@@ -171,18 +171,12 @@ class DiscordListener:
             for attachment in message.attachments:
                 if any(attachment.filename.lower().endswith(ext)
                        for ext in IMAGE_EXTENSIONS):
-                    img_data = await self._download_image(attachment.url)
-                    if img_data:
-                        # 判斷 media type
-                        ext = attachment.filename.rsplit(".", 1)[-1].lower()
-                        media_map = {
-                            "png": "image/png", "jpg": "image/jpeg",
-                            "jpeg": "image/jpeg", "gif": "image/gif",
-                            "webp": "image/webp",
-                        }
+                    result = await self._download_image(attachment.url)
+                    if result:
+                        img_data, media_type = result
                         images.append({
                             "base64": img_data,
-                            "media_type": media_map.get(ext, "image/png"),
+                            "media_type": media_type,
                             "url": attachment.url,
                         })
                         content += "\n[附圖：分析師附上了一張圖片]"
@@ -190,11 +184,12 @@ class DiscordListener:
             # 處理 embed 中的圖片
             for embed in message.embeds:
                 if embed.image and embed.image.url:
-                    img_data = await self._download_image(embed.image.url)
-                    if img_data:
+                    result = await self._download_image(embed.image.url)
+                    if result:
+                        img_data, media_type = result
                         images.append({
                             "base64": img_data,
-                            "media_type": "image/png",
+                            "media_type": media_type,
                             "url": embed.image.url,
                         })
                         content += "\n[附圖：嵌入圖片]"
@@ -221,8 +216,21 @@ class DiscordListener:
         await client.start(self.token)
 
     @staticmethod
-    async def _download_image(url: str) -> str | None:
-        """下載圖片並轉為 base64"""
+    def _detect_media_type(data: bytes) -> str:
+        """從圖片 magic bytes 偵測實際格式"""
+        if data[:4] == b'\x89PNG':
+            return "image/png"
+        if data[:3] == b'\xff\xd8\xff':
+            return "image/jpeg"
+        if data[:4] == b'GIF8':
+            return "image/gif"
+        if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            return "image/webp"
+        return "image/png"  # fallback
+
+    @staticmethod
+    async def _download_image(url: str) -> tuple[str, str] | None:
+        """下載圖片並轉為 base64，回傳 (base64_data, media_type)"""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -232,7 +240,8 @@ class DiscordListener:
                         if len(data) > 5 * 1024 * 1024:
                             logger.warning("Image too large: %d bytes", len(data))
                             return None
-                        return base64.b64encode(data).decode("utf-8")
+                        media_type = DiscordListener._detect_media_type(data)
+                        return base64.b64encode(data).decode("utf-8"), media_type
                     logger.warning("Image download failed: %d", resp.status)
         except Exception as e:
             logger.error("Image download error: %s", e)

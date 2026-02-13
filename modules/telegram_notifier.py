@@ -33,6 +33,7 @@ class TelegramNotifier:
         self._pending_decisions: dict[str, dict] = {}  # msg_id -> decision
         self._cancel_callbacks: dict[str, asyncio.Event] = {}
         self._cancel_reasons: dict[str, dict] = {}  # msg_id -> {event, reason, waiting_text}
+        self._briefing_callback = None  # main.py 設定
 
         logger.info("TelegramNotifier initialized")
 
@@ -56,6 +57,7 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("fix_tp", self._cmd_fix_tp))
         self._app.add_handler(CommandHandler("orders", self._cmd_orders))
         self._app.add_handler(CommandHandler("cancel_orders", self._cmd_cancel_orders))
+        self._app.add_handler(CommandHandler("briefing", self._cmd_briefing))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._text_handler)
         )
@@ -63,6 +65,10 @@ class TelegramNotifier:
         await self._app.initialize()
         await self._app.start()
         await self._app.updater.start_polling(drop_pending_updates=True)
+
+        # 用 Application 的 bot（有 20 連線池）取代預設的 bot（只有 1 連線）
+        self.bot = self._app.bot
+
         logger.info("Telegram bot started with persistent polling")
 
     async def stop(self):
@@ -578,6 +584,7 @@ class TelegramNotifier:
             "/fix_tp [id] - 重設止盈止損掛單\n"
             "/orders [symbol] - 查看 Binance 訂單歷史\n"
             "/cancel_orders <symbol> - 取消殘留掛單\n"
+            "/briefing - 手動觸發早報\n"
             "/stop - 緊急停止\n"
             "/help - 顯示此說明\n"
         )
@@ -979,6 +986,21 @@ class TelegramNotifier:
             await update.message.reply_text(f"✅ 已取消 {symbol} 所有掛單")
         else:
             await update.message.reply_text(f"❌ 取消失敗: {result.get('error')}")
+
+    async def _cmd_briefing(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """手動觸發早報: /briefing"""
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._briefing_callback:
+            await update.message.reply_text("❌ 早報功能未初始化")
+            return
+
+        await update.message.reply_text("📝 正在產生早報，請稍候...")
+        try:
+            await self._briefing_callback()
+        except Exception as e:
+            await update.message.reply_text(f"❌ 早報產生失敗: {e}")
 
     # ── 工具方法 ──
 
