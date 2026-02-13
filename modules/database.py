@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     Column, DateTime, Float, Integer, String, Text, create_engine
@@ -162,12 +163,13 @@ class SignalPattern(Base):
 
 
 class Database:
-    def __init__(self, db_path: str = "./data/trades.db"):
+    def __init__(self, db_path: str = "./data/trades.db", tz_name: str = "UTC"):
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.engine = create_engine(f"sqlite:///{db_path}", echo=False)
         Base.metadata.create_all(self.engine)
         self._migrate(self.engine)
         self._Session = sessionmaker(bind=self.engine)
+        self._tz = ZoneInfo(tz_name)
         logger.info("Database initialized: %s", db_path)
 
     @staticmethod
@@ -239,12 +241,13 @@ class Database:
                     .all())
 
     def get_today_trades(self) -> list[Trade]:
-        today_start = datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+        # 用設定的時區計算「今天零點」，再轉回 UTC 查詢
+        local_now = datetime.now(self._tz)
+        local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start_utc = local_midnight.astimezone(timezone.utc)
         with self.get_session() as s:
             return (s.query(Trade)
-                    .filter(Trade.timestamp >= today_start)
+                    .filter(Trade.timestamp >= today_start_utc)
                     .all())
 
     # ── Analyst operations ──
@@ -502,9 +505,9 @@ class Database:
 
     def get_today_consecutive_losses(self) -> int:
         """計算今日從最近一筆往回數的連續虧損次數"""
-        today_start = datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+        local_now = datetime.now(self._tz)
+        local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = local_midnight.astimezone(timezone.utc)
         with self.get_session() as s:
             trades = (s.query(Trade)
                       .filter(Trade.timestamp >= today_start,

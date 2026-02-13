@@ -45,7 +45,8 @@ class TradingBot:
         logger.info("=" * 50)
 
         # 初始化所有模組
-        self.db = Database(self.config["database"]["path"])
+        tz_name = self.config.get("schedule", {}).get("timezone", "UTC")
+        self.db = Database(self.config["database"]["path"], tz_name=tz_name)
         self.market = MarketData(self.config)
         self.ai = AIAnalyzer(self.config)
         self.risk = RiskManager(self.config, self.db)
