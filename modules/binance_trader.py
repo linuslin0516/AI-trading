@@ -741,8 +741,8 @@ class BinanceTrader:
                                     state["sl_breach_count"], trade.id,
                                     trade.direction, symbol, current_price, sl,
                                 )
-                                if state["sl_breach_count"] >= 2:
-                                    # 連續 2 次確認 → 執行止損
+                                if state["sl_breach_count"] >= 4:
+                                    # 連續 4 次確認（~2 分鐘）→ 執行止損
                                     logger.warning(
                                         "SL confirmed for trade #%d after %d checks",
                                         trade.id, state["sl_breach_count"],
