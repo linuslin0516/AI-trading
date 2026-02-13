@@ -503,6 +503,45 @@ class Database:
         trades = self.get_today_trades()
         return sum(t.profit_pct or 0 for t in trades if t.status == "CLOSED")
 
+    def reset_trade_data(self) -> dict:
+        """清除所有交易相關資料，保留分析師訊息
+
+        清除: trades, analyst_calls, ai_decisions, learning_log, signal_patterns
+        重設: analyst weights/stats → 預設值
+        保留: analyst_messages
+        """
+        with self.get_session() as s:
+            n_trades = s.query(Trade).delete()
+            n_calls = s.query(AnalystCall).delete()
+            n_decisions = s.query(AIDecision).delete()
+            n_logs = s.query(LearningLog).delete()
+            n_patterns = s.query(SignalPattern).delete()
+
+            # 重設分析師統計（保留名稱，權重歸 1.0）
+            n_analysts = s.query(Analyst).update({
+                Analyst.total_calls: 0,
+                Analyst.correct_calls: 0,
+                Analyst.accuracy: 0.0,
+                Analyst.current_weight: 1.0,
+                Analyst.trend_accuracy: 0.0,
+                Analyst.range_accuracy: 0.0,
+                Analyst.recent_7d_accuracy: 0.0,
+                Analyst.recent_30d_accuracy: 0.0,
+            })
+
+            s.commit()
+
+        result = {
+            "trades": n_trades,
+            "analyst_calls": n_calls,
+            "ai_decisions": n_decisions,
+            "learning_logs": n_logs,
+            "signal_patterns": n_patterns,
+            "analysts_reset": n_analysts,
+        }
+        logger.info("Trade data reset: %s", result)
+        return result
+
     def get_today_consecutive_losses(self) -> int:
         """計算今日從最近一筆往回數的連續虧損次數"""
         local_now = datetime.now(self._tz)

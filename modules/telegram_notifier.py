@@ -58,6 +58,7 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("orders", self._cmd_orders))
         self._app.add_handler(CommandHandler("cancel_orders", self._cmd_cancel_orders))
         self._app.add_handler(CommandHandler("briefing", self._cmd_briefing))
+        self._app.add_handler(CommandHandler("reset_trades", self._cmd_reset_trades))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._text_handler)
         )
@@ -589,6 +590,7 @@ class TelegramNotifier:
             "/orders [symbol] - 查看 Binance 訂單歷史\n"
             "/cancel_orders <symbol> - 取消殘留掛單\n"
             "/briefing - 手動觸發早報\n"
+            "/reset_trades confirm - 清除所有交易資料\n"
             "/stop - 緊急停止\n"
             "/help - 顯示此說明\n"
         )
@@ -1007,6 +1009,51 @@ class TelegramNotifier:
             await self._briefing_callback()
         except Exception as e:
             await update.message.reply_text(f"❌ 早報產生失敗: {e}")
+
+    async def _cmd_reset_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """清除所有交易資料，保留分析師訊息: /reset_trades"""
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._db:
+            await update.message.reply_text("❌ 資料庫未初始化")
+            return
+
+        # 需要確認
+        if not context.args or context.args[0] != "confirm":
+            await update.message.reply_text(
+                "⚠️ 此操作將清除所有交易資料：\n\n"
+                "• 所有交易記錄 (trades)\n"
+                "• AI 決策記錄 (ai_decisions)\n"
+                "• 分析師判斷記錄 (analyst_calls)\n"
+                "• 學習日誌 (learning_log)\n"
+                "• 訊號模式 (signal_patterns)\n"
+                "• 分析師權重重設為 1.0\n\n"
+                "✅ 保留：分析師訊息 (analyst_messages)\n\n"
+                "確認請輸入：/reset_trades confirm"
+            )
+            return
+
+        try:
+            result = self._db.reset_trade_data()
+
+            # 清除 PaperTrader 的虛擬持倉
+            if self._trader and hasattr(self._trader, "_positions"):
+                self._trader._positions.clear()
+
+            text = (
+                "✅ 交易資料已清除\n\n"
+                f"• 交易: {result['trades']} 筆\n"
+                f"• 分析師判斷: {result['analyst_calls']} 筆\n"
+                f"• AI 決策: {result['ai_decisions']} 筆\n"
+                f"• 學習日誌: {result['learning_logs']} 筆\n"
+                f"• 訊號模式: {result['signal_patterns']} 筆\n"
+                f"• 分析師權重: {result['analysts_reset']} 人已重設\n\n"
+                "系統已準備好進行全新的 Paper Trading"
+            )
+            await update.message.reply_text(text)
+        except Exception as e:
+            await update.message.reply_text(f"❌ 清除失敗: {e}")
 
     # ── 工具方法 ──
 
