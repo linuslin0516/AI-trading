@@ -9,6 +9,7 @@ from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes,
     MessageHandler, filters,
 )
+from telegram.request import HTTPXRequest
 
 from utils.helpers import format_price, format_pct
 
@@ -40,6 +41,7 @@ class TelegramNotifier:
         self._app = (
             Application.builder()
             .token(self.bot_token)
+            .request(HTTPXRequest(connection_pool_size=20, pool_timeout=10.0))
             .build()
         )
         self._app.add_handler(CallbackQueryHandler(self._button_callback))
@@ -52,6 +54,7 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("close", self._cmd_close))
         self._app.add_handler(CommandHandler("close_all", self._cmd_close_all))
         self._app.add_handler(CommandHandler("fix_tp", self._cmd_fix_tp))
+        self._app.add_handler(CommandHandler("orders", self._cmd_orders))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._text_handler)
         )
@@ -572,6 +575,7 @@ class TelegramNotifier:
             "/close <id> - 平倉指定交易\n"
             "/close_all - 平掉所有持倉\n"
             "/fix_tp [id] - 重設止盈止損掛單\n"
+            "/orders [symbol] - 查看 Binance 訂單歷史\n"
             "/stop - 緊急停止\n"
             "/help - 顯示此說明\n"
         )
@@ -914,6 +918,42 @@ class TelegramNotifier:
 
         text = "🔧 止盈止損重設完成\n\n" + "\n\n".join(results)
         await update.message.reply_text(text)
+
+    async def _cmd_orders(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """查看 Binance 訂單歷史: /orders [symbol]"""
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._trader:
+            await update.message.reply_text("❌ 交易模組未初始化")
+            return
+
+        symbol = "BTCUSDT"
+        if context.args:
+            symbol = context.args[0].upper()
+            if not symbol.endswith("USDT"):
+                symbol += "USDT"
+
+        await update.message.reply_text(f"🔍 查詢 {symbol} 訂單歷史...")
+
+        orders = self._trader.get_recent_orders(symbol, limit=15)
+        if not orders:
+            await update.message.reply_text(f"❌ 沒有找到 {symbol} 的訂單紀錄")
+            return
+
+        lines = [f"📋 {symbol} 最近訂單\n"]
+        for o in orders:
+            status_icon = {"FILLED": "✅", "CANCELED": "🚫", "NEW": "⏳", "EXPIRED": "⏰"}.get(
+                o["status"], "❓"
+            )
+            stop_info = f" @{o['stopPrice']}" if o.get("stopPrice") and o["stopPrice"] != "0" else ""
+            lines.append(
+                f"{status_icon} {o['type']} {o['side']}\n"
+                f"   價格: {o['price']}{stop_info}\n"
+                f"   數量: {o['qty']} | {o['time']}"
+            )
+
+        await update.message.reply_text("\n".join(lines))
 
     # ── 工具方法 ──
 

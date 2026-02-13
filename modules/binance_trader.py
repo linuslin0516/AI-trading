@@ -445,6 +445,32 @@ class BinanceTrader:
         exit_rate = self.taker_rate if exit_type == "TAKER" else self.maker_rate
         return (entry_rate + exit_rate + self.slippage * 2) * leverage * 100
 
+    def get_recent_orders(self, symbol: str, limit: int = 20) -> list[dict]:
+        """查詢 Binance 最近的訂單歷史"""
+        try:
+            orders = self._futures_get("/fapi/v1/allOrders", {
+                "symbol": symbol,
+                "limit": limit,
+            }, signed=True)
+            results = []
+            for o in orders[-limit:]:
+                results.append({
+                    "orderId": o.get("orderId"),
+                    "type": o.get("type"),
+                    "side": o.get("side"),
+                    "status": o.get("status"),
+                    "price": o.get("avgPrice") or o.get("price"),
+                    "stopPrice": o.get("stopPrice"),
+                    "qty": o.get("executedQty"),
+                    "time": datetime.fromtimestamp(
+                        o.get("updateTime", 0) / 1000, tz=timezone.utc
+                    ).strftime("%m-%d %H:%M:%S"),
+                })
+            return results
+        except Exception as e:
+            logger.error("Failed to get orders: %s", e)
+            return []
+
     def close_trade(self, trade_id: int, exit_price: float | None = None) -> dict:
         """手動或自動平倉"""
         trade = self.db.get_trade(trade_id)
@@ -626,17 +652,34 @@ class BinanceTrader:
                                 else trade.take_profit
                             ) or []
 
-                            # 判斷是 SL 還是 TP 觸發（依當前價格離哪邊近）
-                            if trade.direction == "LONG":
-                                near_sl = current_price <= trade.stop_loss * 1.005
-                            else:
-                                near_sl = current_price >= trade.stop_loss * 0.995
+                            # 判斷觸發類型：SL / TP / 強平(liquidation)
+                            sl = trade.stop_loss or 0
+                            last_tp = tp_list[-1] if tp_list else 0
 
-                            event = "stop_loss" if near_sl else "take_profit"
+                            if trade.direction == "LONG":
+                                near_sl = sl and current_price <= sl * 1.005
+                                near_tp = last_tp and current_price >= last_tp * 0.995
+                                # 強平：價格低於止損很多（或介於入場與止損之間的極端位置）
+                                liquidated = sl and current_price < sl * 0.99
+                            else:
+                                near_sl = sl and current_price >= sl * 0.995
+                                near_tp = last_tp and current_price <= last_tp * 1.005
+                                liquidated = sl and current_price > sl * 1.01
+
+                            if liquidated:
+                                event = "liquidation"
+                            elif near_sl:
+                                event = "stop_loss"
+                            elif near_tp:
+                                event = "take_profit"
+                            else:
+                                event = "closed_unknown"
 
                             logger.warning(
-                                "Exchange closed trade #%d (%s %s), event=%s, price=%s",
-                                trade.id, trade.direction, symbol, event, current_price,
+                                "Exchange closed trade #%d (%s %s), event=%s, "
+                                "price=%.4f, entry=%.4f, sl=%.4f, tp=%s",
+                                trade.id, trade.direction, symbol, event,
+                                current_price, trade.entry_price, sl, tp_list,
                             )
 
                             result = self.close_trade(trade.id, current_price)

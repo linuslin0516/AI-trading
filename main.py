@@ -321,11 +321,46 @@ class TradingBot:
                 logger.warning("Failed to send TP1 notification: %s", e)
             return
 
-        if event_type in ("stop_loss", "take_profit"):
+        if event_type in ("stop_loss", "take_profit", "liquidation", "closed_unknown"):
             logger.info(
-                "Position closed by %s: trade #%d",
-                event_type, trade.id,
+                "Position closed by %s: trade #%d %s",
+                event_type, trade.id, trade.symbol,
             )
+
+            # 強平特別警告
+            if event_type == "liquidation":
+                liq_text = (
+                    f"💀 強制平倉 (Liquidation)！\n\n"
+                    f"#{trade.id} {trade.direction} {trade.symbol}\n"
+                    f"入場價: {trade.entry_price}\n"
+                    f"止損價: {trade.stop_loss}\n"
+                    f"平倉價: {data.get('exit_price', 'N/A')}\n\n"
+                    f"⚠️ 倉位被交易所強平，價格已超過止損位。\n"
+                    f"請檢查槓桿倍數和保證金是否足夠。"
+                )
+                try:
+                    await self.telegram.bot.send_message(
+                        chat_id=self.telegram.chat_id, text=liq_text,
+                    )
+                except Exception as e:
+                    logger.error("Failed to send liquidation alert: %s", e)
+
+            if event_type == "closed_unknown":
+                unk_text = (
+                    f"❓ 倉位異常關閉\n\n"
+                    f"#{trade.id} {trade.direction} {trade.symbol}\n"
+                    f"入場價: {trade.entry_price}\n"
+                    f"止損價: {trade.stop_loss}\n"
+                    f"當前價: {data.get('exit_price', 'N/A')}\n\n"
+                    f"倉位在交易所端消失，原因不明。\n"
+                    f"請至 Binance 確認。"
+                )
+                try:
+                    await self.telegram.bot.send_message(
+                        chat_id=self.telegram.chat_id, text=unk_text,
+                    )
+                except Exception as e:
+                    logger.error("Failed to send unknown close alert: %s", e)
 
             # AI 覆盤 + 學習流程
             learn_result = await self.learning.on_trade_closed(trade.id)
