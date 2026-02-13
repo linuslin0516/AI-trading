@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 from datetime import datetime, timezone
@@ -701,11 +702,23 @@ class AIAnalyzer:
                 content = []
                 # 先放圖片
                 for img in images[:4]:  # 最多 4 張圖片
+                    # 用 magic bytes 驗證實際格式（修正 DB 中舊資料的錯誤 media_type）
+                    raw = base64.b64decode(img["base64"][:32])  # 只解碼前幾 bytes
+                    if raw[:3] == b'\xff\xd8\xff':
+                        media_type = "image/jpeg"
+                    elif raw[:4] == b'\x89PNG':
+                        media_type = "image/png"
+                    elif raw[:4] == b'GIF8':
+                        media_type = "image/gif"
+                    elif raw[:4] == b'RIFF' and len(raw) > 11 and raw[8:12] == b'WEBP':
+                        media_type = "image/webp"
+                    else:
+                        media_type = img["media_type"]
                     content.append({
                         "type": "image",
                         "source": {
                             "type": "base64",
-                            "media_type": img["media_type"],
+                            "media_type": media_type,
                             "data": img["base64"],
                         },
                     })
