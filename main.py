@@ -303,8 +303,10 @@ class TradingBot:
             closed_qty = data.get("closed_qty", 0)
             remaining = data.get("remaining_qty", 0)
             current = data.get("current_price", 0)
+            breakeven_sl = data.get("breakeven_sl", 0)
+            old_sl = data.get("old_sl", 0)
 
-            logger.info("TP1 hit for trade #%d %s", trade.id, trade.symbol)
+            logger.info("TP1 hit for trade #%d %s, SL moved to breakeven", trade.id, trade.symbol)
 
             text = (
                 f"🎯 TP1 止盈到達！\n\n"
@@ -313,7 +315,9 @@ class TradingBot:
                 f"當前價格: {current}\n"
                 f"已平倉數量: {closed_qty}\n"
                 f"剩餘倉位: {remaining}\n\n"
-                f"繼續持有，等待目標 2 或止損..."
+                f"🛡️ 已啟動保本機制\n"
+                f"止損已移至成本價: {old_sl} → {breakeven_sl}\n"
+                f"繼續持有，等待目標 2..."
             )
             try:
                 await self.telegram.bot.send_message(

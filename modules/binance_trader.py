@@ -708,12 +708,31 @@ class BinanceTrader:
                                 trade.id, state["initial_qty"], actual_qty,
                             )
 
+                            # TP1 命中 → 止損移至保本價（成本 + 手續費）
+                            old_sl = trade.stop_loss
+                            fee_rate = (self.taker_rate + self.taker_rate
+                                        + self.slippage * 2)
+                            if trade.direction == "LONG":
+                                breakeven_price = trade.entry_price * (1 + fee_rate)
+                            else:
+                                breakeven_price = trade.entry_price * (1 - fee_rate)
+                            breakeven_price = round(breakeven_price, 2)
+                            self.db.update_trade(trade.id, stop_loss=breakeven_price)
+                            logger.info(
+                                "Breakeven SL for trade #%d: %.2f -> %.2f "
+                                "(entry=%.2f + fee=%.4f%%)",
+                                trade.id, old_sl or 0, breakeven_price,
+                                trade.entry_price, fee_rate * 100,
+                            )
+
                             if callback:
                                 await callback("tp1_hit", trade, {
                                     "current_price": current_price,
                                     "tp1_price": tp_list[0] if tp_list else 0,
                                     "closed_qty": state["initial_qty"] - actual_qty,
                                     "remaining_qty": actual_qty,
+                                    "breakeven_sl": breakeven_price,
+                                    "old_sl": old_sl,
                                 })
 
                         # ── Case C: 正常監控 + 計算未實現盈虧 ──
