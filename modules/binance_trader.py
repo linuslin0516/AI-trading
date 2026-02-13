@@ -244,18 +244,9 @@ class BinanceTrader:
         except Exception as e:
             logger.warning("Failed to get quantity precision: %s", e)
 
-        # 停損（全部平倉）
-        try:
-            self._futures_post("/fapi/v1/order", {
-                "symbol": symbol,
-                "side": close_side,
-                "type": "STOP_MARKET",
-                "stopPrice": stop_loss,
-                "closePosition": "true",
-            })
-            logger.info("Stop loss set at %s", stop_loss)
-        except Exception as e:
-            logger.warning("Failed to set SL: %s", e)
+        # 停損：不掛交易所 STOP_MARKET（testnet 插針會誤觸發）
+        # 改由 monitor_positions 本地監控，連續 2 次確認才平倉
+        logger.info("Stop loss at %s (local monitor, no exchange order)", stop_loss)
 
         if not take_profit:
             return
@@ -383,18 +374,8 @@ class BinanceTrader:
                 json.loads(trade.take_profit) if isinstance(trade.take_profit, str) else trade.take_profit
             )
 
-            # 停損
-            try:
-                self._futures_post("/fapi/v1/order", {
-                    "symbol": symbol,
-                    "side": close_side,
-                    "type": "STOP_MARKET",
-                    "stopPrice": sl,
-                    "closePosition": "true",
-                })
-                logger.info("New stop loss set at %s", sl)
-            except Exception as e:
-                logger.warning("Failed to set new SL: %s", e)
+            # 停損：不掛交易所（由本地 monitor 監控）
+            logger.info("Stop loss at %s (local monitor)", sl)
 
             # 停利
             if tp:
@@ -645,6 +626,7 @@ class BinanceTrader:
                             _pos_state[trade.id] = {
                                 "initial_qty": actual_qty if actual_qty > 0 else None,
                                 "tp1_notified": False,
+                                "sl_breach_count": 0,  # 連續觸及 SL 次數
                             }
                         state = _pos_state[trade.id]
 
@@ -744,39 +726,41 @@ class BinanceTrader:
                         fee_pct = self.calc_fee_pct(leverage)
                         unrealized -= fee_pct
 
-                        # Fallback: Binance 查詢失敗時用價格檢查 SL/TP
-                        if not binance_ok:
-                            if trade.direction == "LONG" and current_price <= trade.stop_loss:
-                                logger.warning("Stop loss hit for trade #%d (price fallback)", trade.id)
-                                result = self.close_trade(trade.id, current_price)
-                                if callback:
-                                    await callback("stop_loss", trade, result)
-                                _pos_state.pop(trade.id, None)
-                                continue
-
-                            if trade.direction == "SHORT" and current_price >= trade.stop_loss:
-                                logger.warning("Stop loss hit for trade #%d (price fallback)", trade.id)
-                                result = self.close_trade(trade.id, current_price)
-                                if callback:
-                                    await callback("stop_loss", trade, result)
-                                _pos_state.pop(trade.id, None)
-                                continue
-
-                            tp_list = (
-                                json.loads(trade.take_profit)
-                                if isinstance(trade.take_profit, str)
-                                else trade.take_profit
-                            ) or []
-                            if tp_list and (
-                                (trade.direction == "LONG" and current_price >= tp_list[-1]) or
-                                (trade.direction == "SHORT" and current_price <= tp_list[-1])
-                            ):
-                                logger.info("Take profit hit for trade #%d (price fallback)", trade.id)
-                                result = self.close_trade(trade.id, current_price)
-                                if callback:
-                                    await callback("take_profit", trade, result)
-                                _pos_state.pop(trade.id, None)
-                                continue
+                        # ── Case D: 本地 SL 監控（連續 2 次確認，避免插針） ──
+                        sl = trade.stop_loss or 0
+                        if sl and actual_qty != 0:
+                            sl_breached = (
+                                (trade.direction == "LONG" and current_price <= sl) or
+                                (trade.direction == "SHORT" and current_price >= sl)
+                            )
+                            if sl_breached:
+                                state["sl_breach_count"] += 1
+                                logger.warning(
+                                    "SL breach #%d for trade #%d (%s %s): "
+                                    "price=%.2f, sl=%.2f",
+                                    state["sl_breach_count"], trade.id,
+                                    trade.direction, symbol, current_price, sl,
+                                )
+                                if state["sl_breach_count"] >= 2:
+                                    # 連續 2 次確認 → 執行止損
+                                    logger.warning(
+                                        "SL confirmed for trade #%d after %d checks",
+                                        trade.id, state["sl_breach_count"],
+                                    )
+                                    result = self.close_trade(trade.id, current_price)
+                                    if callback:
+                                        await callback("stop_loss", trade, result)
+                                    _pos_state.pop(trade.id, None)
+                                    continue
+                            else:
+                                # 價格回到 SL 之上，重置計數
+                                if state["sl_breach_count"] > 0:
+                                    logger.info(
+                                        "SL breach reset for trade #%d "
+                                        "(price recovered to %.2f)",
+                                        trade.id, current_price,
+                                    )
+                                    state["sl_breach_count"] = 0
 
                         if callback:
                             await callback("update", trade, {
