@@ -1,4 +1,4 @@
-# DC Trading - AI 自動加密貨幣交易系統
+# DCT Technical Spec — DC Trading 技術規格書
 
 ## 專案概述
 
