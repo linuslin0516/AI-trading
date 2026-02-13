@@ -36,11 +36,11 @@ class PaperTrader:
         # 虛擬持倉追蹤：{symbol: {qty, direction, trade_id, initial_qty, tp1_hit}}
         self._positions: dict[str, dict] = {}
 
-        # 啟動時從 DB 恢復未平倉持倉
-        self._restore_positions()
-
         # 快取交易對精度（避免重複查詢）
         self._precision_cache: dict[str, int] = {}
+
+        # 啟動時從 DB 恢復未平倉持倉
+        self._restore_positions()
 
         logger.info(
             "PaperTrader initialized (mainnet prices, virtual balance=%.2f, leverage=%s)",
