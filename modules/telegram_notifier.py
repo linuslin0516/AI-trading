@@ -522,6 +522,20 @@ class TelegramNotifier:
 
     async def _button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+
+        # 持倉刷新按鈕
+        if query.data == "refresh_positions":
+            await query.answer("刷新中...")
+            try:
+                text = self._build_positions_text()
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 刷新", callback_data="refresh_positions")]
+                ])
+                await query.edit_message_text(text=text, reply_markup=keyboard)
+            except Exception as e:
+                logger.warning("Failed to refresh positions: %s", e)
+            return
+
         await query.answer()
 
         msg_id = str(query.message.message_id)
@@ -673,16 +687,8 @@ class TelegramNotifier:
             logger.exception("Test trade error")
             await update.message.reply_text(f"❌ 測試交易錯誤: {e}")
 
-    async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """查看當前持倉"""
-        if str(update.effective_chat.id) != str(self.chat_id):
-            return
-
-        if not self._db:
-            await update.message.reply_text("❌ 資料庫未初始化")
-            return
-
-        # 取得帳戶餘額
+    def _build_positions_text(self) -> str:
+        """產生持倉資訊文字（供 /positions 和刷新按鈕共用）"""
         is_paper = self.config.get("trading", {}).get("mode") == "paper"
         balance_label = "💰 虛擬帳戶 [模擬]" if is_paper else "💰 帳戶資訊"
         balance_text = ""
@@ -704,16 +710,15 @@ class TelegramNotifier:
             except Exception as e:
                 balance_text = f"{balance_label}: 查詢失敗 ({e})\n\n"
 
-        open_trades = self._db.get_open_trades()
+        open_trades = self._db.get_open_trades() if self._db else []
 
         if not open_trades:
-            await update.message.reply_text(f"{balance_text}📊 目前沒有持倉")
-            return
+            return f"{balance_text}📊 目前沒有持倉"
 
+        now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
         text = f"{balance_text}📊 當前持倉 ({len(open_trades)} 筆)\n{'=' * 25}\n\n"
 
         for t in open_trades:
-            # 取得當前價格計算未實現盈虧（含手續費）
             try:
                 r = requests.get(
                     f"{MARKET_DATA_URL}/api/v3/ticker/price",
@@ -727,7 +732,6 @@ class TelegramNotifier:
                 else:
                     pnl_pct = (t.entry_price - current_price) / t.entry_price * 100 * leverage
 
-                # 扣除預估往返手續費
                 fee_pct = 0
                 if self._trader:
                     fee_pct = self._trader.calc_fee_pct(leverage)
@@ -755,7 +759,23 @@ class TelegramNotifier:
                 f"━━━━━━━━━━━━━━━\n"
             )
 
-        await update.message.reply_text(text)
+        text += f"\n更新時間: {now_str}"
+        return text
+
+    async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """查看當前持倉"""
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._db:
+            await update.message.reply_text("❌ 資料庫未初始化")
+            return
+
+        text = self._build_positions_text()
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 刷新", callback_data="refresh_positions")]
+        ])
+        await update.message.reply_text(text, reply_markup=keyboard)
 
     async def _cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """查看績效總覽"""
