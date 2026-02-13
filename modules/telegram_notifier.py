@@ -103,7 +103,9 @@ class TelegramNotifier:
 
         direction_icon = "🟢 LONG (做多)" if action == "LONG" else "🔴 SHORT (做空)"
         is_scanner = decision.get("_scanner_triggered", False)
-        source_label = "🔍 掃描器主動發現" if is_scanner else "🔔 交易訊號"
+        is_paper = self.config.get("trading", {}).get("mode") == "paper"
+        paper_tag = " [模擬]" if is_paper else ""
+        source_label = ("🔍 掃描器主動發現" if is_scanner else "🔔 交易訊號") + paper_tag
 
         # 計算預估手續費
         fee_cost = 0
@@ -232,8 +234,10 @@ class TelegramNotifier:
         if not self.notify_cfg.get("notify_on_entry", True):
             return
 
+        is_paper = self.config.get("trading", {}).get("mode") == "paper"
+        paper_tag = " [模擬]" if is_paper else ""
         text = (
-            f"✅ 已進場\n\n"
+            f"✅ 已進場{paper_tag}\n\n"
             f"交易 #{trade_result['trade_id']}\n"
             f"{trade_result['direction']} {trade_result['symbol']}\n"
             f"進場價: {format_price(trade_result['entry_price'])}\n"
@@ -677,6 +681,8 @@ class TelegramNotifier:
             return
 
         # 取得帳戶餘額
+        is_paper = self.config.get("trading", {}).get("mode") == "paper"
+        balance_label = "💰 虛擬帳戶 [模擬]" if is_paper else "💰 帳戶資訊"
         balance_text = ""
         if self._trader:
             try:
@@ -686,7 +692,7 @@ class TelegramNotifier:
                 margin = float(account.get("totalMarginBalance", 0))
                 available = float(account.get("availableBalance", 0))
                 balance_text = (
-                    f"💰 帳戶資訊\n"
+                    f"{balance_label}\n"
                     f"━━━━━━━━━━━━━━━\n"
                     f"錢包餘額: {wallet:,.2f} USDT\n"
                     f"未實現盈虧: {unrealized:+,.2f} USDT\n"
@@ -694,7 +700,7 @@ class TelegramNotifier:
                     f"可用餘額: {available:,.2f} USDT\n\n"
                 )
             except Exception as e:
-                balance_text = f"💰 帳戶餘額: 查詢失敗 ({e})\n\n"
+                balance_text = f"{balance_label}: 查詢失敗 ({e})\n\n"
 
         open_trades = self._db.get_open_trades()
 

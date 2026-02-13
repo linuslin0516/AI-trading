@@ -66,6 +66,8 @@ trigger:
 
 # 交易設定
 trading:
+  mode: "paper"              # "paper"（紙上交易，主網價格）或 "testnet"（幣安測試網）
+  paper_balance: 10000       # 紙上交易虛擬餘額（USDT）
   enabled: true
   auto_execute: true
   confirmation_delay: 30

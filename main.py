@@ -54,7 +54,14 @@ class TradingBot:
         self.decision = DecisionEngine(
             self.config, self.db, self.market, self.ai, self.risk, self.calendar
         )
-        self.trader = BinanceTrader(self.config, self.db)
+        trading_mode = self.config.get("trading", {}).get("mode", "testnet")
+        if trading_mode == "paper":
+            from modules.paper_trader import PaperTrader
+            self.trader = PaperTrader(self.config, self.db)
+            logger.info("Trading mode: PAPER (mainnet prices, no real orders)")
+        else:
+            self.trader = BinanceTrader(self.config, self.db)
+            logger.info("Trading mode: TESTNET (Binance testnet)")
         self.telegram = TelegramNotifier(self.config, db=self.db, trader=self.trader)
         self.learning = LearningEngine(self.config, self.db, self.ai, self.risk)
         self.discord = DiscordListener(self.config)
