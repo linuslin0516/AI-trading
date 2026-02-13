@@ -1,7 +1,7 @@
 import base64
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -9,6 +9,7 @@ from modules.ai_analyzer import AIAnalyzer
 from modules.database import Database
 from modules.economic_calendar import EconomicCalendar
 from modules.market_data import MarketData
+from modules.message_scorer import MessageScorer
 from utils.risk_manager import RiskManager
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class DecisionEngine:
         ai_analyzer: AIAnalyzer,
         risk_manager: RiskManager,
         economic_calendar: EconomicCalendar | None = None,
+        message_scorer: MessageScorer | None = None,
     ):
         self.config = config
         self.db = db
@@ -39,6 +41,7 @@ class DecisionEngine:
         self.ai = ai_analyzer
         self.risk = risk_manager
         self.calendar = economic_calendar
+        self.scorer = message_scorer
         logger.info("DecisionEngine initialized")
 
     def process_signals(self, messages: list) -> dict | None:
@@ -65,7 +68,18 @@ class DecisionEngine:
                 "images": getattr(m, "images", []),
             })
 
-        # 2. 偵測提及的幣種
+        # 2. 套用時間衰減 + 試用期折扣
+        analyst_msgs = self._apply_time_decay(analyst_msgs)
+        analyst_msgs = self._apply_trial_period(analyst_msgs)
+
+        # 2.5 品質評分過濾
+        if self.scorer:
+            analyst_msgs = self.scorer.score_messages(analyst_msgs)
+            if not analyst_msgs:
+                logger.info("All messages filtered by quality scoring")
+                return None
+
+        # 3. 偵測提及的幣種
         symbols = self._detect_symbols(messages)
         if not symbols:
             symbols = self.config["binance"].get("symbols", ["BTCUSDT"])
@@ -116,6 +130,9 @@ class DecisionEngine:
             logger.warning("No valid market data available")
             return None
 
+        # 6.5 根據市場狀態調整分析師權重
+        analyst_msgs = self._apply_market_specialization(analyst_msgs, combined_market)
+
         # 7. 取得經濟日曆（接下來 24 小時 + 最近公布的數據）
         econ_text = ""
         if self.calendar:
@@ -124,6 +141,10 @@ class DecisionEngine:
             all_econ = recent + upcoming
             econ_text = self.calendar.format_for_ai(all_econ)
 
+        # 計算分析師共識（在所有權重調整之後）
+        consensus = self._calc_consensus(analyst_msgs)
+        logger.info("Consensus: %s (strength=%.1f%%)", consensus["dominant"], consensus["strength"])
+
         decision = self.ai.analyze(
             analyst_messages=analyst_msgs,
             market_data=combined_market,
@@ -131,6 +152,7 @@ class DecisionEngine:
             performance_stats=performance_stats,
             known_patterns=pattern_dicts,
             economic_events=econ_text,
+            consensus=consensus,
         )
 
         action = decision.get("action", "SKIP")
@@ -153,6 +175,13 @@ class DecisionEngine:
             return decision
 
         if action in ("LONG", "SHORT"):
+            # 附加市場狀態
+            symbol = decision.get("symbol", "")
+            sym_data = combined_market.get(symbol, {})
+            market_cond = sym_data.get("technical_indicators", {}).get(
+                "market_condition", "UNKNOWN")
+            decision["_market_condition"] = market_cond
+
             # 開新倉 → 風控檢查
             risk_result = self.risk.check(decision)
 
@@ -174,11 +203,12 @@ class DecisionEngine:
             decision["_analyst_messages"] = analyst_msgs
 
             logger.info(
-                "Decision approved: %s %s confidence=%d rr=%.2f",
+                "Decision approved: %s %s confidence=%d rr=%.2f [%s]",
                 action,
                 decision.get("symbol", "?"),
                 decision.get("confidence", 0),
                 decision.get("risk_reward", 0),
+                market_cond,
             )
             return decision
 
@@ -210,7 +240,18 @@ class DecisionEngine:
                 "images": images,
             })
 
-        # 2. 取得市場數據（含所有 K 線和技術指標）
+        # 2. 套用時間衰減 + 試用期折扣
+        analyst_msgs = self._apply_time_decay(analyst_msgs)
+        analyst_msgs = self._apply_trial_period(analyst_msgs)
+
+        # 2.5 品質評分過濾
+        if self.scorer:
+            analyst_msgs = self.scorer.score_messages(analyst_msgs)
+            if not analyst_msgs:
+                logger.info("Scanner: all messages filtered by quality scoring")
+                return None
+
+        # 3. 取得市場數據（含所有 K 線和技術指標）
         combined_market = {}
         for symbol in symbols:
             data = self.market.get_symbol_data(symbol)
@@ -221,7 +262,10 @@ class DecisionEngine:
             logger.warning("Scanner: no valid market data available")
             return None
 
-        # 3. 取得持倉、績效、模式
+        # 3.5 根據市場狀態調整分析師權重
+        analyst_msgs = self._apply_market_specialization(analyst_msgs, combined_market)
+
+        # 4. 取得持倉、績效、模式
         open_trades = self.db.get_open_trades()
         open_trades_info = [
             {
@@ -261,6 +305,11 @@ class DecisionEngine:
             except Exception as e:
                 logger.warning("Scanner: economic calendar error: %s", e)
 
+        # 計算分析師共識
+        consensus = self._calc_consensus(analyst_msgs)
+        logger.info("Scanner consensus: %s (strength=%.1f%%)",
+                     consensus["dominant"], consensus["strength"])
+
         # 5. 呼叫 AI 掃描器分析
         decision = self.ai.analyze_scanner(
             analyst_messages=analyst_msgs,
@@ -269,6 +318,7 @@ class DecisionEngine:
             performance_stats=performance_stats,
             known_patterns=pattern_dicts,
             economic_events=econ_text,
+            consensus=consensus,
         )
 
         action = decision.get("action", "SKIP")
@@ -284,6 +334,13 @@ class DecisionEngine:
             return decision
 
         if action in ("LONG", "SHORT"):
+            # 附加市場狀態
+            symbol = decision.get("symbol", "")
+            sym_data = combined_market.get(symbol, {})
+            market_cond = sym_data.get("technical_indicators", {}).get(
+                "market_condition", "UNKNOWN")
+            decision["_market_condition"] = market_cond
+
             risk_result = self.risk.check(decision)
 
             if not risk_result.passed:
@@ -302,16 +359,156 @@ class DecisionEngine:
             decision["_analyst_messages"] = analyst_msgs
 
             logger.info(
-                "Scanner decision approved: %s %s confidence=%d rr=%.2f",
+                "Scanner decision approved: %s %s confidence=%d rr=%.2f [%s]",
                 action,
                 decision.get("symbol", "?"),
                 decision.get("confidence", 0),
                 decision.get("risk_reward", 0),
+                market_cond,
             )
             return decision
 
         logger.warning("Scanner: unknown action: %s", action)
         return None
+
+    def _apply_time_decay(self, analyst_msgs: list) -> list:
+        """對分析師訊息套用時間衰減，近期訊息權重較高"""
+        now = datetime.now(timezone.utc)
+        for msg in analyst_msgs:
+            ts_str = msg.get("timestamp", "")
+            try:
+                if "T" in ts_str:
+                    ts = datetime.fromisoformat(ts_str)
+                else:
+                    # scanner format: "MM-DD HH:MM"
+                    ts = datetime.strptime(ts_str, "%m-%d %H:%M").replace(
+                        year=now.year, tzinfo=timezone.utc
+                    )
+            except (ValueError, TypeError):
+                msg["time_decay"] = 1.0
+                continue
+
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+
+            age = now - ts
+            if age < timedelta(minutes=30):
+                factor = 1.0
+            elif age < timedelta(hours=2):
+                factor = 0.8
+            elif age < timedelta(hours=6):
+                factor = 0.5
+            elif age < timedelta(hours=24):
+                factor = 0.2
+            else:
+                factor = 0.1
+
+            msg["weight"] *= factor
+            msg["time_decay"] = factor
+
+        decayed = [m for m in analyst_msgs if m.get("time_decay", 1.0) < 1.0]
+        if decayed:
+            logger.info("Time decay applied: %d/%d messages decayed",
+                        len(decayed), len(analyst_msgs))
+        return analyst_msgs
+
+    def _apply_trial_period(self, analyst_msgs: list) -> list:
+        """新分析師（<N 筆交易記錄）套用試用期權重折扣"""
+        learn_cfg = self.config.get("learning", {})
+        trial_calls = learn_cfg.get("trial_period_calls", 10)
+        trial_discount = learn_cfg.get("trial_period_discount", 0.5)
+
+        for msg in analyst_msgs:
+            analyst = self.db.get_or_create_analyst(msg["analyst"])
+            if analyst.total_calls < trial_calls:
+                msg["weight"] *= trial_discount
+                msg["trial_period"] = True
+                logger.debug("Trial period discount for %s (calls=%d)",
+                             msg["analyst"], analyst.total_calls)
+        return analyst_msgs
+
+    def _apply_market_specialization(self, analyst_msgs: list, market_data: dict) -> list:
+        """根據市場狀態（TRENDING/RANGING）調整分析師權重"""
+        # 從任一幣種取得 market_condition
+        market_condition = None
+        for symbol, data in market_data.items():
+            indicators = data.get("technical_indicators", {})
+            if "market_condition" in indicators:
+                market_condition = indicators["market_condition"]
+                break
+
+        if not market_condition:
+            return analyst_msgs
+
+        for msg in analyst_msgs:
+            analyst = self.db.get_or_create_analyst(msg["analyst"])
+            # 只有有足夠資料的分析師才調整
+            if analyst.total_calls < 10:
+                continue
+
+            overall = analyst.accuracy or 0.5
+            if overall == 0:
+                overall = 0.5
+
+            if market_condition == "TRENDING":
+                spec_accuracy = analyst.trend_accuracy or overall
+            else:
+                spec_accuracy = analyst.range_accuracy or overall
+
+            # ±30% adjustment, clamped
+            if overall > 0:
+                adj = 0.3 * (spec_accuracy - overall) / overall
+                adj = max(-0.3, min(0.3, adj))
+                msg["weight"] *= (1 + adj)
+                if abs(adj) > 0.05:
+                    logger.debug("Specialization: %s weight adj %.0f%% (%s market)",
+                                 msg["analyst"], adj * 100, market_condition)
+
+        return analyst_msgs
+
+    def _calc_consensus(self, analyst_msgs: list) -> dict:
+        """計算加權多空共識強度"""
+        bullish_weight = 0.0
+        bearish_weight = 0.0
+        neutral_weight = 0.0
+
+        bullish_kw = ["多", "long", "買", "buy", "看漲", "bullish", "做多",
+                       "上漲", "反彈", "突破", "支撐"]
+        bearish_kw = ["空", "short", "賣", "sell", "看跌", "bearish", "做空",
+                       "下跌", "回調", "跌破", "壓力"]
+
+        for msg in analyst_msgs:
+            text = msg["content"].lower()
+            weight = msg["weight"]
+
+            is_bull = any(k in text for k in bullish_kw)
+            is_bear = any(k in text for k in bearish_kw)
+
+            if is_bull and not is_bear:
+                bullish_weight += weight
+            elif is_bear and not is_bull:
+                bearish_weight += weight
+            else:
+                neutral_weight += weight
+
+        total = bullish_weight + bearish_weight + neutral_weight
+        if total == 0:
+            return {
+                "bullish_pct": 0, "bearish_pct": 0, "neutral_pct": 100,
+                "dominant": "NEUTRAL", "strength": 0,
+            }
+
+        dominant = "BULLISH" if bullish_weight > bearish_weight else "BEARISH"
+        if bullish_weight == bearish_weight:
+            dominant = "NEUTRAL"
+
+        return {
+            "bullish_pct": round(bullish_weight / total * 100, 1),
+            "bearish_pct": round(bearish_weight / total * 100, 1),
+            "neutral_pct": round(neutral_weight / total * 100, 1),
+            "dominant": dominant,
+            "strength": round(abs(bullish_weight - bearish_weight) / total * 100, 1),
+        }
 
     def _detect_symbols(self, messages: list) -> list[str]:
         """從分析師訊息中偵測提及的幣種"""

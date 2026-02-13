@@ -230,6 +230,7 @@ class PaperTrader:
                 technical_signals=decision.get("reasoning", {}),
                 entry_order_id=f"PAPER-{int(datetime.now(timezone.utc).timestamp())}",
                 status="OPEN",
+                market_condition=decision.get("_market_condition"),
             )
 
             # 4. 記錄虛擬持倉

@@ -120,6 +120,12 @@ schedule:
   morning_hour: 8         # 每天早上 8:00 發送早報
   evening_hour: 22        # 每天晚上 10:00 發送晚報
 
+# 訊息品質評分（Claude Haiku 預篩選）
+message_scoring:
+  enabled: true
+  min_score: 4                      # 低於此分數的訊息會被過濾
+  model: "claude-haiku-4-5-20251001"
+
 # AI 學習設定
 learning:
   enabled: true
@@ -131,6 +137,10 @@ learning:
   weight_decay: 0.95
   performance_weight: 0.7
   recency_weight: 0.3
+
+  # 分析師試用期
+  trial_period_calls: 10            # 前 N 筆交易為試用期
+  trial_period_discount: 0.5        # 試用期權重折扣
 
 # 通知設定
 notifications:

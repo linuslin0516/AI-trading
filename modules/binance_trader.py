@@ -126,6 +126,7 @@ class BinanceTrader:
                 technical_signals=decision.get("reasoning", {}),
                 entry_order_id=order_id,
                 status="OPEN",
+                market_condition=decision.get("_market_condition"),
             )
 
             # 6. 設定停損停利

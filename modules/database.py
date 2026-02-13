@@ -56,6 +56,11 @@ class Trade(Base):
 
     closed_at = Column(DateTime)
 
+    # 快速回饋（5min/30min/1hr 方向正確性）
+    quick_feedback = Column(Text)  # JSON
+    # 市場狀態（TRENDING / RANGING）
+    market_condition = Column(String(20))
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -116,6 +121,7 @@ class AnalystMessage(Base):
     channel = Column(String(100))
     content = Column(Text, nullable=False)
     images = Column(Text)  # JSON: [{"url": "...", "media_type": "image/png"}, ...]
+    quality_score = Column(Float)  # 0-10, Haiku 品質評分
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -177,15 +183,25 @@ class Database:
         """自動遷移：為已存在的資料表新增缺少的欄位"""
         from sqlalchemy import inspect, text
         inspector = inspect(engine)
-        # analyst_messages: 新增 images 欄位
-        if "analyst_messages" in inspector.get_table_names():
-            cols = [c["name"] for c in inspector.get_columns("analyst_messages")]
-            if "images" not in cols:
-                with engine.begin() as conn:
-                    conn.execute(text(
-                        "ALTER TABLE analyst_messages ADD COLUMN images TEXT"
-                    ))
-                logger.info("Migrated: added 'images' column to analyst_messages")
+
+        # 通用遷移輔助
+        def add_column_if_missing(table: str, column: str, col_type: str):
+            if table in inspector.get_table_names():
+                cols = [c["name"] for c in inspector.get_columns(table)]
+                if column not in cols:
+                    with engine.begin() as conn:
+                        conn.execute(text(
+                            f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"
+                        ))
+                    logger.info("Migrated: added '%s' column to %s", column, table)
+
+        # analyst_messages
+        add_column_if_missing("analyst_messages", "images", "TEXT")
+        add_column_if_missing("analyst_messages", "quality_score", "REAL")
+
+        # trades
+        add_column_if_missing("trades", "quick_feedback", "TEXT")
+        add_column_if_missing("trades", "market_condition", "VARCHAR(20)")
 
     def get_session(self) -> Session:
         return self._Session()

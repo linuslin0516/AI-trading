@@ -469,14 +469,27 @@ class AIAnalyzer:
         performance_stats: dict | None = None,
         known_patterns: list[dict] | None = None,
         economic_events: str = "",
+        consensus: dict | None = None,
     ) -> dict:
         # 格式化分析師訊息
         sorted_msgs = sorted(analyst_messages, key=lambda m: m["weight"], reverse=True)
         analyst_text = ""
         for m in sorted_msgs:
+            decay_tag = f" [衰減:{m['time_decay']:.1f}]" if m.get("time_decay", 1.0) < 1.0 else ""
+            trial_tag = " [試用期]" if m.get("trial_period") else ""
             analyst_text += (
-                f"- **{m['analyst']}** (權重: {m['weight']:.2f}):\n"
+                f"- **{m['analyst']}** (權重: {m['weight']:.2f}{decay_tag}{trial_tag}):\n"
                 f"  {m['content']}\n\n"
+            )
+
+        # 加入共識摘要
+        if consensus:
+            analyst_text += (
+                f"\n📊 分析師共識: {consensus['dominant']} "
+                f"(強度 {consensus['strength']:.0f}%, "
+                f"多 {consensus['bullish_pct']:.0f}% / "
+                f"空 {consensus['bearish_pct']:.0f}% / "
+                f"中性 {consensus['neutral_pct']:.0f}%)\n"
             )
 
         # 收集所有圖片
@@ -523,14 +536,28 @@ class AIAnalyzer:
         performance_stats: dict | None = None,
         known_patterns: list[dict] | None = None,
         economic_events: str = "",
+        consensus: dict | None = None,
     ) -> dict:
         """掃描器專用分析：根據近期分析師觀點 + 最新市場數據主動判斷"""
         sorted_msgs = sorted(analyst_messages, key=lambda m: m["weight"], reverse=True)
         analyst_text = ""
         for m in sorted_msgs:
+            decay_tag = f" [衰減:{m['time_decay']:.1f}]" if m.get("time_decay", 1.0) < 1.0 else ""
+            trial_tag = " [試用期]" if m.get("trial_period") else ""
             analyst_text += (
-                f"- **{m['analyst']}** (權重: {m['weight']:.2f}) [{m.get('timestamp', '')}]:\n"
+                f"- **{m['analyst']}** (權重: {m['weight']:.2f}{decay_tag}{trial_tag}) "
+                f"[{m.get('timestamp', '')}]:\n"
                 f"  {m['content']}\n\n"
+            )
+
+        # 加入共識摘要
+        if consensus:
+            analyst_text += (
+                f"\n📊 分析師共識: {consensus['dominant']} "
+                f"(強度 {consensus['strength']:.0f}%, "
+                f"多 {consensus['bullish_pct']:.0f}% / "
+                f"空 {consensus['bearish_pct']:.0f}% / "
+                f"中性 {consensus['neutral_pct']:.0f}%)\n"
             )
 
         # 收集所有圖片（從 DB URL 重新下載的）

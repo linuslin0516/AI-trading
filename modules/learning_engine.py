@@ -164,6 +164,15 @@ class LearningEngine:
             technical_signals = trade.technical_signals or "{}"
             take_profit = trade.take_profit or "[]"
 
+            # 快速回饋資訊
+            quick_fb = {}
+            if trade.quick_feedback:
+                try:
+                    quick_fb = json.loads(trade.quick_feedback) if isinstance(
+                        trade.quick_feedback, str) else trade.quick_feedback
+                except (json.JSONDecodeError, TypeError):
+                    quick_fb = {}
+
             trade_data = {
                 "symbol": trade.symbol,
                 "direction": trade.direction,
@@ -179,6 +188,7 @@ class LearningEngine:
                 "analyst_opinions": analyst_opinions,
                 "technical_signals": json.loads(technical_signals) if isinstance(technical_signals, str) else technical_signals,
                 "ai_reasoning": trade.ai_reasoning or "N/A",
+                "quick_feedback": quick_fb if quick_fb else "N/A",
             }
 
             review = self.ai.review_trade(trade_data)
@@ -241,8 +251,8 @@ class LearningEngine:
             # 加上 AI 建議的微調
             new_weight = max(0.5, min(2.0, new_weight + weight_adj))
 
-            self.db.update_analyst(
-                name,
+            # 更新趨勢/盤整專項準確率
+            update_kwargs = dict(
                 total_calls=new_total,
                 correct_calls=new_correct,
                 accuracy=round(new_accuracy, 4),
@@ -250,6 +260,23 @@ class LearningEngine:
                 recent_7d_accuracy=round(recent_7d, 4),
                 recent_30d_accuracy=round(recent_30d, 4),
             )
+
+            market_cond = getattr(trade, "market_condition", None)
+            if market_cond == "TRENDING":
+                # 簡單移動平均更新
+                old_ta = analyst.trend_accuracy or 0.5
+                n_trend = max(analyst.total_calls // 2, 1)  # 估算趨勢次數
+                update_kwargs["trend_accuracy"] = round(
+                    old_ta + (1.0 if was_correct else 0.0 - old_ta) / (n_trend + 1), 4
+                )
+            elif market_cond == "RANGING":
+                old_ra = analyst.range_accuracy or 0.5
+                n_range = max(analyst.total_calls // 2, 1)
+                update_kwargs["range_accuracy"] = round(
+                    old_ra + (1.0 if was_correct else 0.0 - old_ra) / (n_range + 1), 4
+                )
+
+            self.db.update_analyst(name, **update_kwargs)
 
             self.db.add_learning_log(
                 event_type="WEIGHT_UPDATE",
@@ -471,6 +498,61 @@ class LearningEngine:
             logger.info("Parameter optimization: no changes needed")
 
         return changes
+
+    def check_quick_feedback(self, trade, current_price: float) -> dict | None:
+        """檢查交易的快速回饋點（5min/30min/1hr）
+
+        Returns: {label, direction_correct, pnl_pct} 或 None（無新 checkpoint）
+        """
+        if not trade.timestamp or not trade.entry_price or not current_price:
+            return None
+
+        elapsed = (datetime.now(timezone.utc) - trade.timestamp).total_seconds()
+
+        # 載入已檢查的 checkpoints
+        existing = {}
+        if trade.quick_feedback:
+            try:
+                existing = json.loads(trade.quick_feedback) if isinstance(
+                    trade.quick_feedback, str) else trade.quick_feedback
+            except (json.JSONDecodeError, TypeError):
+                existing = {}
+
+        checkpoints = [
+            (300, "5min"),
+            (1800, "30min"),
+            (3600, "1hr"),
+        ]
+
+        for secs, label in checkpoints:
+            if elapsed >= secs and label not in existing:
+                # 判斷方向是否正確
+                if trade.direction == "LONG":
+                    direction_correct = current_price > trade.entry_price
+                else:
+                    direction_correct = current_price < trade.entry_price
+
+                pnl_pct = abs(current_price - trade.entry_price) / trade.entry_price * 100
+                if not direction_correct:
+                    pnl_pct = -pnl_pct
+
+                # 記錄到 DB
+                existing[label] = {
+                    "correct": direction_correct,
+                    "pnl_pct": round(pnl_pct, 3),
+                    "price": current_price,
+                }
+                self.db.update_trade(trade.id, quick_feedback=existing)
+
+                logger.info(
+                    "Quick feedback [%s] trade #%d %s: %s (pnl=%.3f%%)",
+                    label, trade.id, trade.symbol,
+                    "correct" if direction_correct else "wrong", pnl_pct,
+                )
+                return {"label": label, "direction_correct": direction_correct,
+                        "pnl_pct": pnl_pct}
+
+        return None
 
     def get_analyst_report(self) -> str:
         """生成分析師績效報告"""

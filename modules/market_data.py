@@ -190,6 +190,13 @@ class MarketData:
         else:
             indicators["trend"] = "neutral"
 
+        # ADX（市場狀態偵測）
+        highs = np.array([k["high"] for k in hourly])
+        lows = np.array([k["low"] for k in hourly])
+        adx = self._calc_adx(closes, highs, lows, period=14)
+        indicators["ADX"] = round(adx, 2)
+        indicators["market_condition"] = "TRENDING" if adx > 25 else "RANGING"
+
         return indicators
 
     def _close_trend_summary(self, klines: dict) -> dict:
@@ -316,6 +323,55 @@ class MarketData:
         mid = np.mean(closes[-period:])
         std = np.std(closes[-period:])
         return mid + std_dev * std, mid, mid - std_dev * std
+
+    @staticmethod
+    def _calc_adx(closes: np.ndarray, highs: np.ndarray, lows: np.ndarray,
+                  period: int = 14) -> float:
+        """計算 ADX (Average Directional Index)"""
+        if len(closes) < period + 1:
+            return 0.0
+
+        # True Range
+        tr = np.maximum(
+            highs[1:] - lows[1:],
+            np.maximum(
+                np.abs(highs[1:] - closes[:-1]),
+                np.abs(lows[1:] - closes[:-1]),
+            ),
+        )
+
+        # +DM / -DM
+        up_move = highs[1:] - highs[:-1]
+        down_move = lows[:-1] - lows[1:]
+
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+        # Smoothed averages (Wilder's smoothing)
+        def wilder_smooth(data, n):
+            result = np.zeros_like(data)
+            result[n - 1] = np.sum(data[:n])
+            for i in range(n, len(data)):
+                result[i] = result[i - 1] - result[i - 1] / n + data[i]
+            return result
+
+        atr = wilder_smooth(tr, period)
+        plus_di_smooth = wilder_smooth(plus_dm, period)
+        minus_di_smooth = wilder_smooth(minus_dm, period)
+
+        # Avoid division by zero
+        atr_safe = np.where(atr == 0, 1, atr)
+        plus_di = 100 * plus_di_smooth / atr_safe
+        minus_di = 100 * minus_di_smooth / atr_safe
+
+        di_sum = plus_di + minus_di
+        di_sum_safe = np.where(di_sum == 0, 1, di_sum)
+        dx = 100 * np.abs(plus_di - minus_di) / di_sum_safe
+
+        # ADX = smoothed DX
+        adx_vals = wilder_smooth(dx[period - 1:], period)
+        valid = adx_vals[adx_vals > 0]
+        return float(valid[-1]) if len(valid) > 0 else 0.0
 
     @staticmethod
     def _calc_ema(closes: np.ndarray, span: int) -> float:

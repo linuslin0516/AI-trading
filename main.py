@@ -27,6 +27,7 @@ from modules.discord_listener import DiscordListener
 from modules.economic_calendar import EconomicCalendar
 from modules.learning_engine import LearningEngine
 from modules.market_data import MarketData
+from modules.message_scorer import MessageScorer
 from modules.telegram_notifier import TelegramNotifier
 from utils.helpers import load_config, setup_logging
 from utils.risk_manager import RiskManager
@@ -51,8 +52,10 @@ class TradingBot:
         self.ai = AIAnalyzer(self.config)
         self.risk = RiskManager(self.config, self.db)
         self.calendar = EconomicCalendar(self.config)
+        self.scorer = MessageScorer(self.config)
         self.decision = DecisionEngine(
-            self.config, self.db, self.market, self.ai, self.risk, self.calendar
+            self.config, self.db, self.market, self.ai, self.risk,
+            self.calendar, self.scorer,
         )
         trading_mode = self.config.get("trading", {}).get("mode", "testnet")
         if trading_mode == "paper":
@@ -110,6 +113,9 @@ class TradingBot:
         # 啟動每日早報（8:00 AM）和晚報（10:00 PM）
         morning_task = asyncio.create_task(self._morning_briefing_loop())
         evening_task = asyncio.create_task(self._evening_summary_loop())
+
+        # 啟動快速回饋學習
+        feedback_task = asyncio.create_task(self._quick_feedback_loop())
 
         # 啟動市場掃描器
         scanner_cfg = self.config.get("market_scanner", {})
@@ -393,6 +399,26 @@ class TradingBot:
         elif event_type == "update":
             # 可選：重要價格變動時通知
             pass
+
+    # ── 快速回饋學習 ──
+
+    async def _quick_feedback_loop(self):
+        """每 60 秒檢查持倉的快速回饋點（5min/30min/1hr）"""
+        logger.info("Quick feedback loop started")
+        await asyncio.sleep(30)  # 初始延遲
+
+        while self._running:
+            try:
+                open_trades = self.db.get_open_trades()
+                for trade in open_trades:
+                    price = self.market.get_current_price(trade.symbol)
+                    if price:
+                        self.learning.check_quick_feedback(trade, price)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug("Quick feedback error: %s", e)
+            await asyncio.sleep(60)
 
     # ── 市場掃描器 ──
 
