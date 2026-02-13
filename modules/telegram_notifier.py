@@ -55,6 +55,7 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("close_all", self._cmd_close_all))
         self._app.add_handler(CommandHandler("fix_tp", self._cmd_fix_tp))
         self._app.add_handler(CommandHandler("orders", self._cmd_orders))
+        self._app.add_handler(CommandHandler("cancel_orders", self._cmd_cancel_orders))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._text_handler)
         )
@@ -576,6 +577,7 @@ class TelegramNotifier:
             "/close_all - 平掉所有持倉\n"
             "/fix_tp [id] - 重設止盈止損掛單\n"
             "/orders [symbol] - 查看 Binance 訂單歷史\n"
+            "/cancel_orders <symbol> - 取消殘留掛單\n"
             "/stop - 緊急停止\n"
             "/help - 顯示此說明\n"
         )
@@ -954,6 +956,29 @@ class TelegramNotifier:
             )
 
         await update.message.reply_text("\n".join(lines))
+
+    async def _cmd_cancel_orders(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """取消指定交易對的所有掛單: /cancel_orders <symbol>"""
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._trader:
+            await update.message.reply_text("❌ 交易模組未初始化")
+            return
+
+        if not context.args:
+            await update.message.reply_text("用法: /cancel_orders BTC\n取消該幣種所有殘留掛單")
+            return
+
+        symbol = context.args[0].upper()
+        if not symbol.endswith("USDT"):
+            symbol += "USDT"
+
+        result = self._trader.cancel_all_orders(symbol)
+        if result.get("success"):
+            await update.message.reply_text(f"✅ 已取消 {symbol} 所有掛單")
+        else:
+            await update.message.reply_text(f"❌ 取消失敗: {result.get('error')}")
 
     # ── 工具方法 ──
 

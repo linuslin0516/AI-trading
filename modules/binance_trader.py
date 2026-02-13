@@ -445,6 +445,16 @@ class BinanceTrader:
         exit_rate = self.taker_rate if exit_type == "TAKER" else self.maker_rate
         return (entry_rate + exit_rate + self.slippage * 2) * leverage * 100
 
+    def cancel_all_orders(self, symbol: str) -> dict:
+        """取消指定交易對的所有掛單"""
+        try:
+            result = self._futures_delete("/fapi/v1/allOpenOrders", {"symbol": symbol})
+            logger.info("Cancelled all open orders for %s", symbol)
+            return {"success": True, "result": result}
+        except Exception as e:
+            logger.error("Failed to cancel orders for %s: %s", symbol, e)
+            return {"success": False, "error": str(e)}
+
     def get_recent_orders(self, symbol: str, limit: int = 20) -> list[dict]:
         """查詢 Binance 最近的訂單歷史"""
         try:
@@ -681,6 +691,15 @@ class BinanceTrader:
                                 trade.id, trade.direction, symbol, event,
                                 current_price, trade.entry_price, sl, tp_list,
                             )
+
+                            # 先取消殘留掛單（TP 單等），避免影響未來倉位
+                            try:
+                                self._futures_delete(
+                                    "/fapi/v1/allOpenOrders", {"symbol": symbol}
+                                )
+                                logger.info("Cleaned up remaining orders for %s", symbol)
+                            except Exception as e:
+                                logger.warning("Failed to clean up orders for %s: %s", symbol, e)
 
                             result = self.close_trade(trade.id, current_price)
                             if callback:
