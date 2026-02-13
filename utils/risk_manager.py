@@ -160,6 +160,22 @@ class RiskManager:
             f"已持有 {symbol} {direction}" if duplicate else "OK",
         )
 
+        # 10. BTC/ETH 相關性衝突警告（僅記錄，不阻擋，讓 AI 自行學習）
+        correlation_pairs = {
+            ("BTCUSDT", "ETHUSDT"),
+            ("ETHUSDT", "BTCUSDT"),
+        }
+        opposite = {"LONG": "SHORT", "SHORT": "LONG"}
+        for t in open_trades:
+            if (symbol, t.symbol) in correlation_pairs:
+                if direction == opposite.get(t.direction):
+                    logger.warning(
+                        "Correlation warning: opening %s %s while holding %s %s "
+                        "(BTC/ETH correlation ~0.85). AI decided to proceed.",
+                        symbol, direction, t.symbol, t.direction,
+                    )
+                    break
+
         if result.passed:
             logger.info("Risk check PASSED for %s %s", symbol, direction)
         else:
