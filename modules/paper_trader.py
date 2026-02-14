@@ -39,13 +39,26 @@ class PaperTrader:
         # 快取交易對精度（避免重複查詢）
         self._precision_cache: dict[str, int] = {}
 
-        # 啟動時從 DB 恢復未平倉持倉
+        # 啟動時修正 profit_usd 欄位 & 恢復未平倉持倉
+        self._migrate_profit_usd()
         self._restore_positions()
 
         logger.info(
             "PaperTrader initialized (mainnet prices, virtual balance=%.2f, leverage=%s)",
             self.paper_balance, self.leverage_map or self.default_leverage,
         )
+
+    def _migrate_profit_usd(self):
+        """一次性修正 profit_usd（舊版存的是百分比，應為 USDT 金額）"""
+        closed = [t for t in self.db.get_closed_trades(500)
+                  if t.status == "CLOSED" and t.profit_pct is not None]
+        for t in closed:
+            margin = self.paper_balance * (t.position_size or 0) / 100
+            correct_usd = round(margin * t.profit_pct / 100, 4)
+            if abs((t.profit_usd or 0) - correct_usd) > 0.01:
+                self.db.update_trade(t.id, profit_usd=correct_usd)
+                logger.info("Fixed profit_usd for trade #%d: %.4f -> %.4f",
+                            t.id, t.profit_usd or 0, correct_usd)
 
     def _restore_positions(self):
         """從 DB 恢復未平倉的虛擬持倉"""
@@ -121,10 +134,17 @@ class PaperTrader:
     # ── 虛擬餘額 ──
 
     def _get_virtual_balance(self) -> float:
-        """計算虛擬帳戶餘額 = 初始金額 + 所有已平倉交易盈虧"""
-        stats = self.db.get_performance_stats()
-        total_profit_pct = stats.get("total_profit_pct", 0)
-        return self.paper_balance * (1 + total_profit_pct / 100)
+        """計算虛擬帳戶餘額 = 初始金額 + 每筆交易實際盈虧(USDT)"""
+        closed = [t for t in self.db.get_closed_trades(500)
+                  if t.status == "CLOSED"]
+        if not closed:
+            return self.paper_balance
+        # 帳戶影響% = profit_pct(保證金盈虧%) × position_size(佔帳戶%) / 100
+        account_impact_pct = sum(
+            (t.profit_pct or 0) * (t.position_size or 0) / 100
+            for t in closed
+        )
+        return self.paper_balance * (1 + account_impact_pct / 100)
 
     def _get_used_margin(self) -> float:
         """計算已使用保證金"""
@@ -319,11 +339,14 @@ class PaperTrader:
 
             # 更新記錄
             outcome = "WIN" if profit_pct > 0 else ("LOSS" if profit_pct < 0 else "BREAKEVEN")
+            # profit_usd = 保證金 × 盈虧%
+            margin_usd = self._get_virtual_balance() * (trade.position_size or 0) / 100
+            actual_profit_usd = margin_usd * profit_pct / 100
             self.db.update_trade(
                 trade_id,
                 exit_price=exit_price,
                 profit_pct=round(profit_pct, 4),
-                profit_usd=round(profit_pct * trade.position_size / 100, 4),
+                profit_usd=round(actual_profit_usd, 4),
                 hold_duration=hold_duration,
                 outcome=outcome,
                 status="CLOSED",
