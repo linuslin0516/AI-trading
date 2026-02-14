@@ -101,6 +101,7 @@ class TradingBot:
         try:
             await self.telegram.start()
             self.telegram._briefing_callback = self.generate_and_send_briefing
+            self.telegram._review_callback = self._manual_review
             logger.info("Telegram bot started")
         except Exception as e:
             logger.error("Telegram start failed: %s", e)
@@ -679,6 +680,16 @@ class TradingBot:
         if target <= now:
             target += timedelta(days=1)
         return (target - now).total_seconds()
+
+    async def _manual_review(self, trade_id: int) -> dict:
+        """手動觸發覆盤"""
+        trade = self.db.get_trade(trade_id)
+        if not trade:
+            return {"review": None, "error": "Trade not found"}
+        if trade.status not in ("CLOSED",):
+            return {"review": None, "error": "Trade not closed yet"}
+        result = await self.learning.on_trade_closed(trade_id)
+        return result
 
     async def generate_and_send_briefing(self):
         """產生並發送早報（供定時任務和手動指令共用）"""

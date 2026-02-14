@@ -44,8 +44,6 @@ class RiskManager:
 
         # 硬限制（不可修改）
         self.absolute_max_position = limits.get("absolute_max_position", 5.0)
-        self.absolute_max_daily_loss = limits.get("absolute_max_daily_loss", 10.0)
-        self.emergency_stop_loss = limits.get("emergency_stop_loss", 20.0)
         self.cooldown_minutes = limits.get("cooldown_minutes", 30)
 
         self._last_trade_time: datetime | None = None
@@ -98,13 +96,12 @@ class RiskManager:
             f"{today_trade_count}/{self.max_daily_trades}",
         )
 
-        # 6. 今日虧損
+        # 6. 今日虧損（帳戶級別：profit_pct × position_size 加權）
         today_pnl = self.db.get_today_pnl()
-        effective_max_loss = min(self.max_daily_loss, self.absolute_max_daily_loss)
         result.add_check(
             "今日虧損",
-            abs(today_pnl) < effective_max_loss if today_pnl < 0 else True,
-            f"{today_pnl:+.2f}% (上限 -{effective_max_loss}%)",
+            abs(today_pnl) < self.max_daily_loss if today_pnl < 0 else True,
+            f"{today_pnl:+.2f}% (上限 -{self.max_daily_loss}%)",
         )
 
         # 6.5 連續虧損檢查（連輸 N 次當日停止）
@@ -115,15 +112,6 @@ class RiskManager:
             f"連輸 {consecutive_losses} 次 (上限 {self.max_consecutive_losses})"
             if consecutive_losses >= self.max_consecutive_losses
             else f"連輸 {consecutive_losses} 次，尚可交易",
-        )
-
-        # 7. 總虧損緊急停止
-        stats = self.db.get_performance_stats()
-        total_pnl = stats.get("total_profit_pct", 0)
-        result.add_check(
-            "總虧損",
-            total_pnl > -self.emergency_stop_loss,
-            f"{total_pnl:+.2f}% (緊急停止 -{self.emergency_stop_loss}%)",
         )
 
         # 7. 冷卻時間
@@ -192,20 +180,18 @@ class RiskManager:
         for key, value in kwargs.items():
             if hasattr(self, key) and key not in (
                 "absolute_max_position",
-                "absolute_max_daily_loss",
-                "emergency_stop_loss",
             ):
                 old = getattr(self, key)
                 setattr(self, key, value)
                 logger.info("Risk param updated: %s %s -> %s", key, old, value)
 
     def is_emergency_stop(self) -> bool:
-        stats = self.db.get_performance_stats()
-        total_pnl = stats.get("total_profit_pct", 0)
-        if total_pnl <= -self.emergency_stop_loss:
+        """今日虧損超過上限 → 緊急停止"""
+        today_pnl = self.db.get_today_pnl()
+        if today_pnl <= -self.max_daily_loss:
             logger.critical(
-                "EMERGENCY STOP: total PnL %.2f%% <= -%.2f%%",
-                total_pnl, self.emergency_stop_loss,
+                "EMERGENCY STOP: today PnL %.2f%% <= -%.2f%%",
+                today_pnl, self.max_daily_loss,
             )
             return True
         return False

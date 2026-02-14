@@ -34,6 +34,7 @@ class TelegramNotifier:
         self._cancel_callbacks: dict[str, asyncio.Event] = {}
         self._cancel_reasons: dict[str, dict] = {}  # msg_id -> {event, reason, waiting_text}
         self._briefing_callback = None  # main.py 設定
+        self._review_callback = None    # main.py 設定
 
         logger.info("TelegramNotifier initialized")
 
@@ -59,6 +60,7 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("cancel_orders", self._cmd_cancel_orders))
         self._app.add_handler(CommandHandler("briefing", self._cmd_briefing))
         self._app.add_handler(CommandHandler("reset_trades", self._cmd_reset_trades))
+        self._app.add_handler(CommandHandler("review", self._cmd_review))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._text_handler)
         )
@@ -1074,6 +1076,49 @@ class TelegramNotifier:
             await update.message.reply_text(text)
         except Exception as e:
             await update.message.reply_text(f"❌ 清除失敗: {e}")
+
+    async def _cmd_review(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """手動觸發覆盤: /review <trade_id>"""
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not context.args:
+            await update.message.reply_text("用法: /review <trade_id>\n例如: /review 3")
+            return
+
+        try:
+            trade_id = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("❌ trade_id 必須是數字")
+            return
+
+        if not self._review_callback:
+            await update.message.reply_text("❌ 覆盤功能未初始化")
+            return
+
+        await update.message.reply_text(f"🔄 正在覆盤 trade #{trade_id}...")
+
+        try:
+            result = await self._review_callback(trade_id)
+            if result and result.get("review"):
+                review = result["review"]
+                score = review.get("overall_score", "N/A")
+                timing = review.get("timing_assessment", "N/A")
+                exit_a = review.get("exit_assessment", "N/A")
+                lessons = review.get("lessons_learned", [])
+                lessons_text = "\n".join(f"  • {l}" for l in lessons[:3]) if lessons else "N/A"
+                text = (
+                    f"✅ Trade #{trade_id} 覆盤完成\n\n"
+                    f"評分: {score}/10\n"
+                    f"進場: {timing}\n"
+                    f"出場: {exit_a}\n\n"
+                    f"教訓:\n{lessons_text}"
+                )
+                await update.message.reply_text(text[:4000])
+            else:
+                await update.message.reply_text(f"❌ Trade #{trade_id} 覆盤失敗")
+        except Exception as e:
+            await update.message.reply_text(f"❌ 覆盤錯誤: {e}")
 
     # ── 工具方法 ──
 

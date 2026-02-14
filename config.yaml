@@ -95,15 +95,13 @@ trading:
   max_position_size: 5.0       # 每筆最多 5% 倉位（AI 根據信心自行決定 1-5%）
   max_positions: 2             # 最多同時持 2 倉（BTC + ETH 各一）
   max_daily_trades: 20         # 短線高頻，不限制次數（贏就繼續開）
-  max_daily_loss: 15.0         # 每日最大虧損 15%
+  max_daily_loss: 20.0         # 每日最大虧損 20%（帳戶級別，已按倉位加權）
   max_consecutive_losses: 3    # 連輸 3 次當日停止交易
   confirmation_delay: 15       # 確認時間縮短到 15 秒（快進快出）
 
 # 風控硬限制（AI 無法修改）
 risk_limits:
   absolute_max_position: 5.0   # 單筆倉位不超過 5%
-  absolute_max_daily_loss: 20.0  # 日虧硬上限 20%（超過直接停止）
-  emergency_stop_loss: 40.0    # 總帳戶虧 40% 緊急停止一切交易
   cooldown_minutes: 5          # 冷卻縮短到 5 分鐘（短線需要快速反應）
 
 # 市場掃描器設定（主動掃描市場，結合分析師觀點尋找入場機會）

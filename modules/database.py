@@ -516,8 +516,12 @@ class Database:
         }
 
     def get_today_pnl(self) -> float:
+        """今日帳戶級別盈虧% = sum(profit_pct × position_size / 100)"""
         trades = self.get_today_trades()
-        return sum(t.profit_pct or 0 for t in trades if t.status == "CLOSED")
+        return sum(
+            (t.profit_pct or 0) * (t.position_size or 0) / 100
+            for t in trades if t.status == "CLOSED"
+        )
 
     def reset_trade_data(self) -> dict:
         """清除所有交易相關資料，保留分析師訊息

@@ -173,6 +173,13 @@ class LearningEngine:
                 except (json.JSONDecodeError, TypeError):
                     quick_fb = {}
 
+            # 截斷過長欄位，避免超過 Claude 200K token 限制
+            if len(analyst_opinions) > 3000:
+                analyst_opinions = analyst_opinions[:3000] + "\n...(截斷)"
+            ai_reasoning = trade.ai_reasoning or "N/A"
+            if len(ai_reasoning) > 2000:
+                ai_reasoning = ai_reasoning[:2000] + "\n...(截斷)"
+
             trade_data = {
                 "symbol": trade.symbol,
                 "direction": trade.direction,
@@ -187,7 +194,7 @@ class LearningEngine:
                 "profit_pct": trade.profit_pct,
                 "analyst_opinions": analyst_opinions,
                 "technical_signals": json.loads(technical_signals) if isinstance(technical_signals, str) else technical_signals,
-                "ai_reasoning": trade.ai_reasoning or "N/A",
+                "ai_reasoning": ai_reasoning,
                 "quick_feedback": quick_fb if quick_fb else "N/A",
             }
 
