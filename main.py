@@ -290,19 +290,25 @@ class TradingBot:
             f"分析師: {reasoning.get('analyst_consensus', 'N/A')}\n"
         )
 
-        await self.telegram.bot.send_message(
-            chat_id=self.telegram.chat_id, text=text
-        )
+        try:
+            await self.telegram.bot.send_message(
+                chat_id=self.telegram.chat_id, text=text
+            )
+        except Exception as e:
+            logger.warning("Failed to send ADJUST notification: %s", e)
 
-        # 執行調整
+        # 執行調整（即使 TG 通知失敗也要執行）
         result = self.trader.adjust_trade(trade_id, new_sl, new_tp)
 
         if result.get("success"):
             changes = "\n".join(f"  • {c}" for c in result.get("changes", []))
-            await self.telegram.bot.send_message(
-                chat_id=self.telegram.chat_id,
-                text=f"✅ 交易 #{trade_id} 已調整\n{changes}",
-            )
+            try:
+                await self.telegram.bot.send_message(
+                    chat_id=self.telegram.chat_id,
+                    text=f"✅ 交易 #{trade_id} 已調整\n{changes}",
+                )
+            except Exception as e:
+                logger.warning("Failed to send ADJUST result: %s", e)
         else:
             await self.telegram.send_error(
                 f"調整失敗: {result.get('error', 'Unknown')}"
