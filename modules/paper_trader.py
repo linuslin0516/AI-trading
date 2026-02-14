@@ -49,7 +49,8 @@ class PaperTrader:
         )
 
     def _migrate_profit_usd(self):
-        """一次性修正 profit_usd（舊版存的是百分比，應為 USDT 金額）"""
+        """一次性修正 profit_usd 和 PARTIAL_CLOSE 的 TP1 利潤"""
+        # 修正已平倉交易的 profit_usd
         closed = [t for t in self.db.get_closed_trades(500)
                   if t.status == "CLOSED" and t.profit_pct is not None]
         for t in closed:
@@ -59,6 +60,40 @@ class PaperTrader:
                 self.db.update_trade(t.id, profit_usd=correct_usd)
                 logger.info("Fixed profit_usd for trade #%d: %.4f -> %.4f",
                             t.id, t.profit_usd or 0, correct_usd)
+
+        # 修正 PARTIAL_CLOSE 交易：補算 TP1 利潤 + 倉位減半
+        partial = [t for t in self.db.get_open_trades()
+                   if t.status == "PARTIAL_CLOSE"]
+        for t in partial:
+            if t.profit_usd and t.profit_usd != 0:
+                continue  # 已有 TP1 利潤，跳過
+            tp_list = (
+                json.loads(t.take_profit)
+                if isinstance(t.take_profit, str)
+                else t.take_profit
+            ) or []
+            if not tp_list:
+                continue
+            tp1_price = tp_list[0]
+            leverage = self.leverage_map.get(t.symbol, self.default_leverage)
+            if t.direction == "LONG":
+                tp1_pct = (tp1_price - t.entry_price) / t.entry_price * 100
+            else:
+                tp1_pct = (t.entry_price - tp1_price) / t.entry_price * 100
+            tp1_pct *= leverage
+            tp1_pct -= self.calc_fee_pct(leverage)
+            # 原始倉位% = 當前 position_size × 2（還沒減半的舊資料）
+            orig_size = t.position_size * 2 if t.position_size else 0
+            half_margin = self.paper_balance * orig_size / 100 / 2
+            tp1_profit = round(half_margin * tp1_pct / 100, 4)
+            # 更新 DB
+            updates = {"profit_usd": tp1_profit}
+            # 若倉位尚未減半，補減半
+            if orig_size > 0 and t.position_size == orig_size:
+                updates["position_size"] = orig_size / 2
+            self.db.update_trade(t.id, **updates)
+            logger.info("Fixed TP1 profit for trade #%d: $%.4f (pos_size=%.2f%%)",
+                        t.id, tp1_profit, updates.get("position_size", t.position_size))
 
     def _restore_positions(self):
         """從 DB 恢復未平倉的虛擬持倉"""
@@ -134,17 +169,23 @@ class PaperTrader:
     # ── 虛擬餘額 ──
 
     def _get_virtual_balance(self) -> float:
-        """計算虛擬帳戶餘額 = 初始金額 + 每筆交易實際盈虧(USDT)"""
-        closed = [t for t in self.db.get_closed_trades(500)
-                  if t.status == "CLOSED"]
-        if not closed:
-            return self.paper_balance
-        # 帳戶影響% = profit_pct(保證金盈虧%) × position_size(佔帳戶%) / 100
-        account_impact_pct = sum(
+        """計算虛擬帳戶餘額 = 初始金額 + 已實現盈虧"""
+        all_trades = self.db.get_closed_trades(500)
+
+        # 已平倉交易：用加權公式
+        closed = [t for t in all_trades if t.status == "CLOSED"]
+        closed_pnl = sum(
             (t.profit_pct or 0) * (t.position_size or 0) / 100
             for t in closed
         )
-        return self.paper_balance * (1 + account_impact_pct / 100)
+        closed_usd = self.paper_balance * closed_pnl / 100
+
+        # PARTIAL_CLOSE 交易的 TP1 已實現利潤（存在 profit_usd）
+        partial = [t for t in self.db.get_open_trades()
+                   if t.status == "PARTIAL_CLOSE"]
+        tp1_usd = sum(t.profit_usd or 0 for t in partial)
+
+        return self.paper_balance + closed_usd + tp1_usd
 
     def _get_used_margin(self) -> float:
         """計算已使用保證金"""
@@ -339,9 +380,11 @@ class PaperTrader:
 
             # 更新記錄
             outcome = "WIN" if profit_pct > 0 else ("LOSS" if profit_pct < 0 else "BREAKEVEN")
-            # profit_usd = 保證金 × 盈虧%
+            # profit_usd = 剩餘倉位盈虧 + TP1 已實現利潤
+            tp1_profit = trade.profit_usd or 0  # TP1 時存入的已實現利潤
             margin_usd = self._get_virtual_balance() * (trade.position_size or 0) / 100
-            actual_profit_usd = margin_usd * profit_pct / 100
+            remaining_profit_usd = margin_usd * profit_pct / 100
+            actual_profit_usd = remaining_profit_usd + tp1_profit
             self.db.update_trade(
                 trade_id,
                 exit_price=exit_price,
@@ -537,8 +580,31 @@ class PaperTrader:
                                     trade.id, old_qty, new_qty,
                                 )
 
-                                # 更新 DB 狀態
-                                self.db.update_trade(trade.id, status="PARTIAL_CLOSE")
+                                # 計算 TP1 已實現利潤
+                                tp1_price = tp_list[0]
+                                leverage = self.leverage_map.get(symbol, self.default_leverage)
+                                if trade.direction == "LONG":
+                                    tp1_pct = (tp1_price - trade.entry_price) / trade.entry_price * 100
+                                else:
+                                    tp1_pct = (trade.entry_price - tp1_price) / trade.entry_price * 100
+                                tp1_pct *= leverage
+                                tp1_fee = self.calc_fee_pct(leverage)
+                                tp1_pct -= tp1_fee
+                                half_margin = self._get_virtual_balance() * (trade.position_size or 0) / 100 / 2
+                                tp1_profit_usd = round(half_margin * tp1_pct / 100, 4)
+
+                                logger.info(
+                                    "TP1 realized profit for trade #%d: %.2f%% on margin $%.2f = $%.4f",
+                                    trade.id, tp1_pct, half_margin, tp1_profit_usd,
+                                )
+
+                                # 更新 DB：記錄 TP1 利潤、倉位減半
+                                self.db.update_trade(
+                                    trade.id,
+                                    status="PARTIAL_CLOSE",
+                                    profit_usd=tp1_profit_usd,
+                                    position_size=trade.position_size / 2,
+                                )
 
                                 # 移動 SL 到保本價
                                 old_sl = trade.stop_loss
