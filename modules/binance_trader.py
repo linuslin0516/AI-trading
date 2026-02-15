@@ -536,13 +536,24 @@ class BinanceTrader:
                 trade_ts = trade_ts.replace(tzinfo=timezone.utc)
             hold_duration = int((now - trade_ts).total_seconds())
 
-            # 更新記錄
-            outcome = "WIN" if profit_pct > 0 else ("LOSS" if profit_pct < 0 else "BREAKEVEN")
+            # 更新記錄：合併 TP1 已實現利潤
+            tp1_profit = trade.profit_usd or 0  # TP1 時存入的已實現利潤
+            remaining_profit_usd = round(profit_pct * trade.position_size / 100, 4)
+            actual_profit_usd = remaining_profit_usd + tp1_profit
+
+            # 如果 TP1 已實現，用總利潤重算整體報酬率
+            if tp1_profit > 0:
+                full_position_size = trade.position_size * 2  # TP1 時已減半
+                if full_position_size > 0:
+                    profit_pct = actual_profit_usd / full_position_size * 100
+
+            # outcome 基於總利潤（含 TP1 已實現）決定
+            outcome = "WIN" if actual_profit_usd > 0 else ("LOSS" if actual_profit_usd < 0 else "BREAKEVEN")
             self.db.update_trade(
                 trade_id,
                 exit_price=exit_price,
                 profit_pct=round(profit_pct, 4),
-                profit_usd=round(profit_pct * trade.position_size / 100, 4),
+                profit_usd=round(actual_profit_usd, 4),
                 hold_duration=hold_duration,
                 outcome=outcome,
                 status="CLOSED",
@@ -709,7 +720,26 @@ class BinanceTrader:
                                 trade.id, state["initial_qty"], actual_qty,
                             )
 
-                            # TP1 命中 → 止損移至保本價（成本 + 手續費）
+                            # TP1 命中 → 計算 TP1 已實現利潤（估算）
+                            tp1_price = tp_list[0] if tp_list else current_price
+                            leverage = self.leverage_map.get(symbol, self.default_leverage)
+                            if trade.direction == "LONG":
+                                tp1_pct = (tp1_price - trade.entry_price) / trade.entry_price * 100
+                            else:
+                                tp1_pct = (trade.entry_price - tp1_price) / trade.entry_price * 100
+                            tp1_pct *= leverage
+                            tp1_fee = self.calc_fee_pct(leverage)
+                            tp1_pct -= tp1_fee
+                            closed_ratio = (state["initial_qty"] - actual_qty) / state["initial_qty"]
+                            tp1_profit_usd = round(
+                                trade.position_size * closed_ratio * tp1_pct / 100, 4
+                            )
+                            logger.info(
+                                "TP1 realized profit for trade #%d: %.2f%% = $%.4f",
+                                trade.id, tp1_pct, tp1_profit_usd,
+                            )
+
+                            # 止損移至保本價（成本 + 手續費）
                             old_sl = trade.stop_loss
                             fee_rate = (self.taker_rate + self.taker_rate
                                         + self.slippage * 2)
@@ -718,7 +748,13 @@ class BinanceTrader:
                             else:
                                 breakeven_price = trade.entry_price * (1 - fee_rate)
                             breakeven_price = round(breakeven_price, 2)
-                            self.db.update_trade(trade.id, stop_loss=breakeven_price)
+                            self.db.update_trade(
+                                trade.id,
+                                stop_loss=breakeven_price,
+                                status="PARTIAL_CLOSE",
+                                profit_usd=tp1_profit_usd,
+                                position_size=round(trade.position_size * (1 - closed_ratio), 4),
+                            )
                             logger.info(
                                 "Breakeven SL for trade #%d: %.2f -> %.2f "
                                 "(entry=%.2f + fee=%.4f%%)",

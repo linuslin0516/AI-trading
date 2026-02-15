@@ -378,13 +378,20 @@ class PaperTrader:
                 trade_ts = trade_ts.replace(tzinfo=timezone.utc)
             hold_duration = int((now - trade_ts).total_seconds())
 
-            # 更新記錄
-            outcome = "WIN" if profit_pct > 0 else ("LOSS" if profit_pct < 0 else "BREAKEVEN")
-            # profit_usd = 剩餘倉位盈虧 + TP1 已實現利潤
+            # 更新記錄：profit_usd = 剩餘倉位盈虧 + TP1 已實現利潤
             tp1_profit = trade.profit_usd or 0  # TP1 時存入的已實現利潤
             margin_usd = self._get_virtual_balance() * (trade.position_size or 0) / 100
             remaining_profit_usd = margin_usd * profit_pct / 100
             actual_profit_usd = remaining_profit_usd + tp1_profit
+
+            # 如果 TP1 已實現，用總利潤重算整體報酬率
+            if tp1_profit > 0:
+                full_margin = margin_usd * 2  # TP1 時 position_size 已減半
+                if full_margin > 0:
+                    profit_pct = actual_profit_usd / full_margin * 100
+
+            # outcome 基於總利潤（含 TP1 已實現）決定
+            outcome = "WIN" if actual_profit_usd > 0 else ("LOSS" if actual_profit_usd < 0 else "BREAKEVEN")
             self.db.update_trade(
                 trade_id,
                 exit_price=exit_price,
