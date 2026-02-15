@@ -50,92 +50,37 @@ class RiskManager:
         logger.info("RiskManager initialized")
 
     def check(self, decision: dict) -> RiskCheckResult:
-        """執行所有風控檢查"""
+        """執行所有風控檢查（模擬模式：全部只顯示不阻擋，讓 AI 多學習）"""
         result = RiskCheckResult()
 
         confidence = decision.get("confidence", 0)
         risk_reward = decision.get("risk_reward", 0)
         position_size = decision.get("position_size", 0)
+        symbol = decision.get("symbol", "")
+        direction = decision.get("action", "")
+        open_trades = self.db.get_open_trades()
+        today_trades = self.db.get_today_trades()
+        today_pnl = self.db.get_today_pnl()
+        consecutive_losses = self.db.get_today_consecutive_losses()
 
-        # 1. 信心分數
+        # ── 硬性檢查（即使模擬也阻擋）──
+        # 1. 信心分數（太低的信號沒有學習價值）
         result.add_check(
             "信心分數",
             confidence >= self.min_confidence,
             f"{confidence}% (最低 {self.min_confidence}%)",
         )
 
-        # 2. 風報比
-        result.add_check(
-            "風報比",
-            risk_reward >= self.min_risk_reward,
-            f"{risk_reward:.2f} (最低 {self.min_risk_reward})",
-        )
-
-        # 3. 倉位大小（軟限制 + 硬限制）
-        effective_max = min(self.max_position_size, self.absolute_max_position)
-        result.add_check(
-            "倉位大小",
-            position_size <= effective_max,
-            f"{position_size}% (上限 {effective_max}%)",
-        )
-
-        # 4. 持倉數量
-        open_trades = self.db.get_open_trades()
-        result.add_check(
-            "持倉數量",
-            len(open_trades) < self.max_positions,
-            f"{len(open_trades)}/{self.max_positions}",
-        )
-
-        # 5. 今日下單次數
-        today_trades = self.db.get_today_trades()
-        today_trade_count = len(today_trades)
-        result.add_check(
-            "今日單數",
-            today_trade_count < self.max_daily_trades,
-            f"{today_trade_count}/{self.max_daily_trades}",
-        )
-
-        # 6. 今日虧損（帳戶級別：profit_pct × position_size 加權）
-        today_pnl = self.db.get_today_pnl()
-        result.add_check(
-            "今日虧損",
-            abs(today_pnl) < self.max_daily_loss if today_pnl < 0 else True,
-            f"{today_pnl:+.2f}% (上限 -{self.max_daily_loss}%)",
-        )
-
-        # 6.5 連續虧損（僅顯示，不阻擋 — 模擬階段讓 AI 多學習）
-        consecutive_losses = self.db.get_today_consecutive_losses()
-        result.add_check(
-            "連續虧損",
-            True,
-            f"連輸 {consecutive_losses} 次（不阻擋）",
-        )
-
-        # 7. 冷卻時間
-        cooldown_ok = True
-        if self._last_trade_time:
-            elapsed = (datetime.now(timezone.utc) - self._last_trade_time).total_seconds()
-            cooldown_ok = elapsed >= self.cooldown_minutes * 60
-        result.add_check(
-            "冷卻時間",
-            cooldown_ok,
-            f"已等待 {int(elapsed // 60)}m" if self._last_trade_time and not cooldown_ok
-            else "OK",
-        )
-
-        # 8. 允許的交易對
-        symbol = decision.get("symbol", "")
-        direction = decision.get("action", "")
+        # 2. 允許的交易對
         if self.allowed_symbols:
             result.add_check(
                 "允許幣種",
                 symbol in self.allowed_symbols,
                 f"{symbol}" if symbol in self.allowed_symbols
-                else f"{symbol} 不在允許列表 {self.allowed_symbols}",
+                else f"{symbol} 不在允許列表",
             )
 
-        # 9. 是否重複方向
+        # 3. 重複持倉（同幣種同方向不重複開）
         duplicate = any(
             t.symbol == symbol and t.direction == direction
             for t in open_trades
@@ -146,21 +91,18 @@ class RiskManager:
             f"已持有 {symbol} {direction}" if duplicate else "OK",
         )
 
-        # 10. BTC/ETH 相關性衝突警告（僅記錄，不阻擋，讓 AI 自行學習）
-        correlation_pairs = {
-            ("BTCUSDT", "ETHUSDT"),
-            ("ETHUSDT", "BTCUSDT"),
-        }
-        opposite = {"LONG": "SHORT", "SHORT": "LONG"}
-        for t in open_trades:
-            if (symbol, t.symbol) in correlation_pairs:
-                if direction == opposite.get(t.direction):
-                    logger.warning(
-                        "Correlation warning: opening %s %s while holding %s %s "
-                        "(BTC/ETH correlation ~0.85). AI decided to proceed.",
-                        symbol, direction, t.symbol, t.direction,
-                    )
-                    break
+        # ── 資訊顯示（不阻擋，供覆盤參考）──
+        effective_max = min(self.max_position_size, self.absolute_max_position)
+        info_checks = [
+            ("風報比", f"{risk_reward:.2f} (參考 {self.min_risk_reward})"),
+            ("倉位大小", f"{position_size}% (上限 {effective_max}%)"),
+            ("持倉數量", f"{len(open_trades)}/{self.max_positions}"),
+            ("今日單數", f"{len(today_trades)}/{self.max_daily_trades}"),
+            ("今日盈虧", f"{today_pnl:+.2f}%"),
+            ("連續虧損", f"連輸 {consecutive_losses} 次"),
+        ]
+        for name, detail in info_checks:
+            result.add_check(name, True, detail)
 
         if result.passed:
             logger.info("Risk check PASSED for %s %s", symbol, direction)
@@ -184,12 +126,5 @@ class RiskManager:
                 logger.info("Risk param updated: %s %s -> %s", key, old, value)
 
     def is_emergency_stop(self) -> bool:
-        """今日虧損超過上限 → 緊急停止"""
-        today_pnl = self.db.get_today_pnl()
-        if today_pnl <= -self.max_daily_loss:
-            logger.critical(
-                "EMERGENCY STOP: today PnL %.2f%% <= -%.2f%%",
-                today_pnl, self.max_daily_loss,
-            )
-            return True
+        """模擬階段不觸發緊急停止"""
         return False
