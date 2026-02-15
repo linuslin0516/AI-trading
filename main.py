@@ -483,16 +483,10 @@ class TradingBot:
                     await asyncio.sleep(interval)
                     continue
 
-                # 4. 過濾掉已有持倉的幣種（不重複開倉）
+                # 4. 掃描所有允許的幣種（同方向可同時持倉）
                 open_trades = self.db.get_open_trades()
                 held_symbols = {t.symbol for t in open_trades}
-                scan_symbols = [s for s in allowed_symbols if s not in held_symbols]
-
-                if not scan_symbols:
-                    logger.debug("Scanner: all symbols have open positions (%s), skipping",
-                                 ", ".join(held_symbols))
-                    await asyncio.sleep(interval)
-                    continue
+                scan_symbols = allowed_symbols  # 不再跳過已持倉幣種
 
                 # 5. 過濾關鍵字（只保留需要掃描的幣種）
                 scan_keywords = []
