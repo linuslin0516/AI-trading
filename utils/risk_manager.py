@@ -91,10 +91,16 @@ class RiskManager:
             f"已持有 {symbol} {direction}" if duplicate else "OK",
         )
 
+        # 4. 風報比（太低的單數學上不划算，阻擋）
+        result.add_check(
+            "風報比",
+            risk_reward >= self.min_risk_reward,
+            f"{risk_reward:.2f} (最低 {self.min_risk_reward})",
+        )
+
         # ── 資訊顯示（不阻擋，供覆盤參考）──
         effective_max = min(self.max_position_size, self.absolute_max_position)
         info_checks = [
-            ("風報比", f"{risk_reward:.2f} (參考 {self.min_risk_reward})"),
             ("倉位大小", f"{position_size}% (上限 {effective_max}%)"),
             ("持倉數量", f"{len(open_trades)}/{self.max_positions}"),
             ("今日單數", f"{len(today_trades)}/{self.max_daily_trades}"),
