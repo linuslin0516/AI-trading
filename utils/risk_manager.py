@@ -104,14 +104,12 @@ class RiskManager:
             f"{today_pnl:+.2f}% (上限 -{self.max_daily_loss}%)",
         )
 
-        # 6.5 連續虧損檢查（連輸 N 次當日停止）
+        # 6.5 連續虧損（僅顯示，不阻擋 — 模擬階段讓 AI 多學習）
         consecutive_losses = self.db.get_today_consecutive_losses()
         result.add_check(
             "連續虧損",
-            consecutive_losses < self.max_consecutive_losses,
-            f"連輸 {consecutive_losses} 次 (上限 {self.max_consecutive_losses})"
-            if consecutive_losses >= self.max_consecutive_losses
-            else f"連輸 {consecutive_losses} 次，尚可交易",
+            True,
+            f"連輸 {consecutive_losses} 次（不阻擋）",
         )
 
         # 7. 冷卻時間
