@@ -80,15 +80,12 @@ class RiskManager:
                 else f"{symbol} 不在允許列表",
             )
 
-        # 3. 重複持倉（同幣種同方向不重複開）
-        duplicate = any(
-            t.symbol == symbol and t.direction == direction
-            for t in open_trades
-        )
+        # 3. 重複持倉（同幣種不論方向都不重複開）
+        existing = next((t for t in open_trades if t.symbol == symbol), None)
         result.add_check(
             "重複持倉",
-            not duplicate,
-            f"已持有 {symbol} {direction}" if duplicate else "OK",
+            existing is None,
+            f"已持有 {symbol} {existing.direction}" if existing else "OK",
         )
 
         # 4. 風報比（太低的單數學上不划算，阻擋）
