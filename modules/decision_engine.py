@@ -141,6 +141,16 @@ class DecisionEngine:
             all_econ = recent + upcoming
             econ_text = self.calendar.format_for_ai(all_econ)
 
+        # 取得分析師績效檔案
+        analyst_names_in_batch = list(set(m["analyst"] for m in analyst_msgs))
+        analyst_profiles = self.db.get_analyst_profiles(names=analyst_names_in_batch)
+
+        # 取得近期覆盤教訓
+        review_lessons = self.db.get_recent_review_lessons(limit=10)
+
+        # 市場狀態策略指引
+        market_strategy_hint = self._build_market_strategy_hint(combined_market)
+
         # 計算分析師共識（在所有權重調整之後）
         consensus = self._calc_consensus(analyst_msgs)
         logger.info("Consensus: %s (strength=%.1f%%)", consensus["dominant"], consensus["strength"])
@@ -153,6 +163,9 @@ class DecisionEngine:
             known_patterns=pattern_dicts,
             economic_events=econ_text,
             consensus=consensus,
+            analyst_profiles=analyst_profiles,
+            review_lessons=review_lessons,
+            market_strategy_hint=market_strategy_hint,
         )
 
         action = decision.get("action", "SKIP")
@@ -305,6 +318,16 @@ class DecisionEngine:
             except Exception as e:
                 logger.warning("Scanner: economic calendar error: %s", e)
 
+        # 取得分析師績效檔案
+        analyst_names_in_batch = list(set(m["analyst"] for m in analyst_msgs))
+        analyst_profiles = self.db.get_analyst_profiles(names=analyst_names_in_batch)
+
+        # 取得近期覆盤教訓
+        review_lessons = self.db.get_recent_review_lessons(limit=10)
+
+        # 市場狀態策略指引
+        market_strategy_hint = self._build_market_strategy_hint(combined_market)
+
         # 計算分析師共識
         consensus = self._calc_consensus(analyst_msgs)
         logger.info("Scanner consensus: %s (strength=%.1f%%)",
@@ -319,6 +342,9 @@ class DecisionEngine:
             known_patterns=pattern_dicts,
             economic_events=econ_text,
             consensus=consensus,
+            analyst_profiles=analyst_profiles,
+            review_lessons=review_lessons,
+            market_strategy_hint=market_strategy_hint,
         )
 
         action = decision.get("action", "SKIP")
@@ -370,6 +396,34 @@ class DecisionEngine:
 
         logger.warning("Scanner: unknown action: %s", action)
         return None
+
+    def _build_market_strategy_hint(self, market_data: dict) -> str:
+        """根據當前市場狀態（TRENDING/RANGING）產生策略指引"""
+        hints = []
+        for symbol, data in market_data.items():
+            indicators = data.get("technical_indicators", {})
+            condition = indicators.get("market_condition", "UNKNOWN")
+            adx = indicators.get("ADX", 0)
+            trend = indicators.get("trend", "neutral")
+
+            if condition == "TRENDING":
+                hints.append(
+                    f"📈 {symbol} 趨勢行情 (ADX={adx}, 趨勢={trend})\n"
+                    f"  策略: 順勢交易，不要逆勢。"
+                    f"止盈可設寬一點（BTC 1-2%, ETH 2-3%），讓利潤奔跑。"
+                    f"回調到 EMA 附近是好的入場時機。"
+                )
+            elif condition == "RANGING":
+                hints.append(
+                    f"📊 {symbol} 盤整行情 (ADX={adx})\n"
+                    f"  策略: 均值回歸，高拋低吸。"
+                    f"止盈設緊一點（BTC 0.5-1%, ETH 1-1.5%），快進快出。"
+                    f"在布林帶上下軌附近反向操作勝率較高。"
+                )
+            else:
+                hints.append(f"⚠️ {symbol} 市場狀態不明 — 建議降低倉位或觀望")
+
+        return "\n".join(hints) if hints else "無市場狀態數據"
 
     def _apply_time_decay(self, analyst_msgs: list) -> list:
         """對分析師訊息套用時間衰減，近期訊息權重較高"""

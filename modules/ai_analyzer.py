@@ -55,6 +55,10 @@ BTC/ETH 同時持倉規則（重要！）：
 9. 止盈目標設定靈活：短線交易可以設定較近的止盈（BTC 0.5-1%，ETH 1-2%），快進快出
 10. 風報比計算時，預期獲利和最大虧損都要扣掉手續費成本再評估
 11. BTC 和 ETH 可以同時同方向持倉；只需避免反向對沖，除非有明確理由
+12. 參考分析師績效檔案：近7天準確率高的分析師觀點更可靠；趨勢行情中優先信任 trend_accuracy 高的，盤整行情中優先信任 range_accuracy 高的
+13. 覆盤教訓是你最重要的學習來源：仔細閱讀近期交易的經驗教訓，避免重複犯錯，並採納策略建議改進決策
+14. 嚴格遵守市場狀態策略指引：趨勢行情用順勢策略（寬止盈），盤整行情用均值回歸策略（窄止盈），不同狀態下止盈止損設定差異很大
+15. 多時間框架對齊：market data 中的 mtf_alignment 欄位顯示 4h→1h→15m 方向一致性。alignment_score >60 或 <-60 是強信號，方向分歧時降低倉位
 
 你的回應必須是有效的 JSON，不要包含任何 markdown 標記或其他文字。"""
 
@@ -63,8 +67,14 @@ ANALYSIS_PROMPT_TEMPLATE = """## 分析請求
 ### 分析師訊息（按權重排序）
 {analyst_messages}
 
+### 分析師績效檔案
+{analyst_profiles}
+
 ### 即時市場數據
 {market_data}
+
+### 市場狀態策略指引
+{market_strategy_hint}
 
 ### 目前持倉中的交易
 {open_trades}
@@ -74,6 +84,9 @@ ANALYSIS_PROMPT_TEMPLATE = """## 分析請求
 
 ### 已知高勝率模式
 {known_patterns}
+
+### 近期覆盤教訓（最近交易的經驗學習）
+{review_lessons}
 
 ### 經濟日曆（近期重要數據）
 {economic_events}
@@ -329,8 +342,14 @@ SCANNER_PROMPT_TEMPLATE = """## 市場主動掃描分析
 ### 最近分析師觀點（按權重排序，注意時間戳）
 {analyst_messages}
 
+### 分析師績效檔案
+{analyst_profiles}
+
 ### 即時市場數據（含 5m/15m K 線）
 {market_data}
+
+### 市場狀態策略指引
+{market_strategy_hint}
 
 ### 目前持倉中的交易
 {open_trades}
@@ -340,6 +359,9 @@ SCANNER_PROMPT_TEMPLATE = """## 市場主動掃描分析
 
 ### 已知高勝率模式
 {known_patterns}
+
+### 近期覆盤教訓
+{review_lessons}
 
 ### 經濟日曆（近期重要數據）
 {economic_events}
@@ -353,6 +375,9 @@ SCANNER_PROMPT_TEMPLATE = """## 市場主動掃描分析
 - 15 分鐘 K 線：找精確入場點（回調到支撐位、突破壓力位、K 線反轉信號）
 - 5 分鐘 K 線：僅作為輔助參考，確認短線動能，不要以此作為主要判斷依據
 - 分析師的觀點通常是基於小時級別的判斷，用 1h K 線驗證他們的觀點是否仍然有效
+- market data 中的 mtf_alignment 欄位提供了預計算的多時間框架對齊分數和狀態
+- alignment_score > 60（強多頭對齊）或 < -60（強空頭對齊）是最佳入場時機
+- alignment_score 在 -30 到 30 之間表示時間框架方向分歧，建議降低倉位
 
 ⚠️ K 線收盤價原則（必須遵守）：
 - 所有趨勢判斷以「收盤價」(close) 為準，忽略影子線 (high/low wicks)
@@ -469,6 +494,9 @@ class AIAnalyzer:
         known_patterns: list[dict] | None = None,
         economic_events: str = "",
         consensus: dict | None = None,
+        analyst_profiles: list[dict] | None = None,
+        review_lessons: list[dict] | None = None,
+        market_strategy_hint: str = "",
     ) -> dict:
         # 格式化分析師訊息
         sorted_msgs = sorted(analyst_messages, key=lambda m: m["weight"], reverse=True)
@@ -516,12 +544,21 @@ class AIAnalyzer:
             known_patterns, indent=2, ensure_ascii=False
         )
 
+        # 格式化分析師績效檔案
+        profile_text = self._format_analyst_profiles(analyst_profiles)
+
+        # 格式化近期覆盤教訓
+        lessons_text = self._format_review_lessons(review_lessons)
+
         prompt = ANALYSIS_PROMPT_TEMPLATE.format(
             analyst_messages=analyst_text,
+            analyst_profiles=profile_text,
             market_data=market_text,
+            market_strategy_hint=market_strategy_hint or "無策略指引",
             open_trades=trades_text,
             performance_stats=perf_text,
             known_patterns=pattern_text,
+            review_lessons=lessons_text,
             economic_events=economic_events or "近期無重要經濟數據",
         )
 
@@ -536,6 +573,9 @@ class AIAnalyzer:
         known_patterns: list[dict] | None = None,
         economic_events: str = "",
         consensus: dict | None = None,
+        analyst_profiles: list[dict] | None = None,
+        review_lessons: list[dict] | None = None,
+        market_strategy_hint: str = "",
     ) -> dict:
         """掃描器專用分析：根據近期分析師觀點 + 最新市場數據主動判斷"""
         sorted_msgs = sorted(analyst_messages, key=lambda m: m["weight"], reverse=True)
@@ -580,12 +620,21 @@ class AIAnalyzer:
             known_patterns, indent=2, ensure_ascii=False
         )
 
+        # 格式化分析師績效檔案
+        profile_text = self._format_analyst_profiles(analyst_profiles)
+
+        # 格式化近期覆盤教訓
+        lessons_text = self._format_review_lessons(review_lessons)
+
         prompt = SCANNER_PROMPT_TEMPLATE.format(
             analyst_messages=analyst_text,
+            analyst_profiles=profile_text,
             market_data=market_text,
+            market_strategy_hint=market_strategy_hint or "無策略指引",
             open_trades=trades_text,
             performance_stats=perf_text,
             known_patterns=pattern_text,
+            review_lessons=lessons_text,
             economic_events=economic_events or "近期無重要經濟數據",
         )
 
@@ -705,6 +754,41 @@ class AIAnalyzer:
             economic_events=economic_events or "今日無經濟數據公布",
         )
         return self._call_claude(prompt)
+
+    @staticmethod
+    def _format_analyst_profiles(profiles: list[dict] | None) -> str:
+        """格式化分析師績效檔案供 prompt 使用"""
+        if not profiles:
+            return "尚無分析師績效數據"
+        lines = []
+        for p in profiles:
+            lines.append(
+                f"- {p['name']}: 總體準確率 {p['accuracy']}% "
+                f"(近7天 {p['recent_7d_accuracy']}%, 近30天 {p['recent_30d_accuracy']}%) "
+                f"趨勢行情 {p['trend_accuracy']}%, 盤整行情 {p['range_accuracy']}% "
+                f"(共 {p['total_calls']} 筆判斷)"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_review_lessons(lessons: list[dict] | None) -> str:
+        """格式化近期覆盤教訓供 prompt 使用"""
+        if not lessons:
+            return "尚無覆盤數據"
+        lines = []
+        for r in lessons[:5]:  # 最多 5 筆，節省 token
+            outcome_icon = "WIN" if r["outcome"] == "WIN" else "LOSS"
+            profit = r.get("profit_pct") or 0
+            score = r.get("score") or "N/A"
+            lines.append(
+                f"- #{r['trade_id']} {r['symbol']} {r['direction']} "
+                f"{outcome_icon} {profit:+.2f}% (評分 {score}/10)"
+            )
+            for lesson in (r.get("lessons") or [])[:2]:  # 每筆最多 2 條教訓
+                lines.append(f"  教訓: {lesson}")
+            for sug in (r.get("suggestions") or [])[:1]:  # 每筆最多 1 條建議
+                lines.append(f"  建議: {sug}")
+        return "\n".join(lines)
 
     def _format_decisions(self, decisions: list[dict] | None) -> str:
         """格式化 AI 決策記錄供 prompt 使用"""

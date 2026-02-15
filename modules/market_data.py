@@ -67,6 +67,11 @@ class MarketData:
             # 收盤價趨勢摘要（讓 AI 快速理解趨勢方向，不受影子線干擾）
             data["close_trend"] = self._close_trend_summary(data["klines"])
 
+            # 多時間框架對齊分析
+            data["mtf_alignment"] = self._calc_mtf_alignment(
+                data["klines"], data["close_trend"]
+            )
+
             # 資金費率（期貨）
             data["funding_rate"] = self._get_funding_rate(symbol)
 
@@ -253,6 +258,79 @@ class MarketData:
             }
 
         return summary
+
+    def _calc_mtf_alignment(self, klines: dict, close_trend: dict) -> dict:
+        """計算多時間框架對齊分數（4h→1h→15m 方向一致性）"""
+        timeframes = ["4h", "1h", "15m"]
+        directions = {}
+
+        for tf in timeframes:
+            trend_info = close_trend.get(tf, {})
+            direction = trend_info.get("direction", "sideways")
+            momentum = trend_info.get("momentum", "flat")
+
+            # 量化方向：+1 = bullish, -1 = bearish, 0 = sideways
+            if direction == "bullish":
+                score = 1.0
+            elif direction == "bearish":
+                score = -1.0
+            else:
+                score = 0.0
+
+            # momentum 加權
+            if momentum in ("accelerating_up", "turning_up"):
+                score = max(score, 0.5) if score >= 0 else score + 0.5
+            elif momentum in ("accelerating_down", "turning_down"):
+                score = min(score, -0.5) if score <= 0 else score - 0.5
+
+            directions[tf] = {
+                "direction": direction,
+                "momentum": momentum,
+                "score": round(score, 1),
+            }
+
+        # 計算對齊分數（正規化到 -100 ~ +100）
+        scores = [directions[tf]["score"] for tf in timeframes if tf in directions]
+        raw_alignment = sum(scores)
+        max_possible = len(scores) * 1.5
+        alignment_pct = round(raw_alignment / max_possible * 100) if max_possible > 0 else 0
+
+        # 判斷對齊狀態
+        if alignment_pct >= 60:
+            status = "strong_bullish_alignment"
+            label = "多頭強對齊"
+        elif alignment_pct >= 30:
+            status = "bullish_alignment"
+            label = "多頭對齊"
+        elif alignment_pct <= -60:
+            status = "strong_bearish_alignment"
+            label = "空頭強對齊"
+        elif alignment_pct <= -30:
+            status = "bearish_alignment"
+            label = "空頭對齊"
+        else:
+            status = "mixed"
+            label = "方向分歧"
+
+        bullish_tfs = [tf for tf in timeframes if directions.get(tf, {}).get("score", 0) > 0]
+        bearish_tfs = [tf for tf in timeframes if directions.get(tf, {}).get("score", 0) < 0]
+
+        if len(bullish_tfs) >= 2:
+            recommendation = f"{'→'.join(bullish_tfs)} 看多"
+        elif len(bearish_tfs) >= 2:
+            recommendation = f"{'→'.join(bearish_tfs)} 看空"
+        else:
+            recommendation = "時間框架方向不一致，建議觀望或降低倉位"
+
+        return {
+            "alignment_score": alignment_pct,
+            "status": status,
+            "label": label,
+            "timeframes": directions,
+            "bullish_tfs": bullish_tfs,
+            "bearish_tfs": bearish_tfs,
+            "recommendation": recommendation,
+        }
 
     def _calc_15m_indicators(self, klines: dict) -> dict:
         """計算 15m 技術指標（基於收盤價）"""

@@ -293,6 +293,63 @@ class Database:
             analyst = s.query(Analyst).filter(Analyst.name == name).first()
             return analyst.current_weight if analyst else 1.0
 
+    def get_analyst_profiles(self, names: list[str] | None = None) -> list[dict]:
+        """取得分析師績效檔案，供 AI prompt 使用"""
+        with self.get_session() as s:
+            query = s.query(Analyst)
+            if names:
+                query = query.filter(Analyst.name.in_(names))
+            analysts = query.all()
+
+        return [
+            {
+                "name": a.name,
+                "total_calls": a.total_calls,
+                "accuracy": round((a.accuracy or 0) * 100, 1),
+                "recent_7d_accuracy": round((a.recent_7d_accuracy or 0) * 100, 1),
+                "recent_30d_accuracy": round((a.recent_30d_accuracy or 0) * 100, 1),
+                "trend_accuracy": round((a.trend_accuracy or 0) * 100, 1),
+                "range_accuracy": round((a.range_accuracy or 0) * 100, 1),
+                "weight": round(a.current_weight, 3),
+            }
+            for a in analysts
+            if a.total_calls > 0
+        ]
+
+    def get_recent_review_lessons(self, limit: int = 10) -> list[dict]:
+        """從最近已覆盤的交易中提取經驗教訓"""
+        with self.get_session() as s:
+            trades = (
+                s.query(Trade)
+                .filter(Trade.status == "CLOSED", Trade.review.isnot(None))
+                .order_by(Trade.closed_at.desc())
+                .limit(limit)
+                .all()
+            )
+
+        lessons = []
+        for t in trades:
+            try:
+                review = json.loads(t.review) if isinstance(t.review, str) else t.review
+                if not review:
+                    continue
+                entry = {
+                    "trade_id": t.id,
+                    "symbol": t.symbol,
+                    "direction": t.direction,
+                    "outcome": t.outcome,
+                    "profit_pct": t.profit_pct,
+                    "score": review.get("overall_score"),
+                    "lessons": review.get("lessons_learned", []),
+                    "suggestions": review.get("strategy_suggestions", []),
+                }
+                if entry["lessons"] or entry["suggestions"]:
+                    lessons.append(entry)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        return lessons
+
     # ── Analyst call operations ──
 
     def record_analyst_call(self, trade_id: int, analyst_name: str,
