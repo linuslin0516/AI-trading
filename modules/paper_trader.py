@@ -693,7 +693,7 @@ class PaperTrader:
                         fee_pct = self.calc_fee_pct(leverage)
                         unrealized -= fee_pct
 
-                        # ── Case D: 本地 SL 監控（連續 4 次確認） ──
+                        # ── Case D: 本地 SL 監控（主網價格，一觸即發） ──
                         sl = trade.stop_loss or 0
                         if sl and actual_qty > 0:
                             sl_breached = (
@@ -701,32 +701,17 @@ class PaperTrader:
                                 (trade.direction == "SHORT" and current_price >= sl)
                             )
                             if sl_breached:
-                                state["sl_breach_count"] += 1
                                 logger.warning(
-                                    "SL breach #%d for paper trade #%d (%s %s): "
+                                    "SL hit for paper trade #%d (%s %s): "
                                     "price=%.2f, sl=%.2f",
-                                    state["sl_breach_count"], trade.id,
-                                    trade.direction, symbol, current_price, sl,
+                                    trade.id, trade.direction, symbol,
+                                    current_price, sl,
                                 )
-                                if state["sl_breach_count"] >= 2:
-                                    logger.warning(
-                                        "SL confirmed for paper trade #%d after %d checks",
-                                        trade.id, state["sl_breach_count"],
-                                    )
-                                    # 用 SL 價格平倉（模擬交易所掛單成交）
-                                    result = self.close_trade(trade.id, sl)
-                                    if callback:
-                                        await callback("stop_loss", trade, result)
-                                    _pos_state.pop(trade.id, None)
-                                    continue
-                            else:
-                                if state["sl_breach_count"] > 0:
-                                    logger.info(
-                                        "SL breach reset for paper trade #%d "
-                                        "(price recovered to %.2f)",
-                                        trade.id, current_price,
-                                    )
-                                    state["sl_breach_count"] = 0
+                                result = self.close_trade(trade.id, sl)
+                                if callback:
+                                    await callback("stop_loss", trade, result)
+                                _pos_state.pop(trade.id, None)
+                                continue
 
                         if callback:
                             await callback("update", trade, {
