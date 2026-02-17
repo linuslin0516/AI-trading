@@ -60,9 +60,13 @@ class TradingBot:
         trading_mode = self.config.get("trading", {}).get("mode", "testnet")
         if trading_mode == "paper":
             from modules.paper_trader import PaperTrader
-            self.trader = PaperTrader(self.config, self.db)
-            logger.info("Trading mode: PAPER (mainnet prices, no real orders)")
+            from modules.price_feed import PriceFeed
+            symbols = self.config.get("binance", {}).get("symbols", ["BTCUSDT", "ETHUSDT"])
+            self.price_feed = PriceFeed(symbols=symbols)
+            self.trader = PaperTrader(self.config, self.db, price_feed=self.price_feed)
+            logger.info("Trading mode: PAPER (mainnet prices + WebSocket, no real orders)")
         else:
+            self.price_feed = None
             self.trader = BinanceTrader(self.config, self.db)
             logger.info("Trading mode: TESTNET (Binance testnet)")
         self.telegram = TelegramNotifier(self.config, db=self.db, trader=self.trader)
@@ -108,6 +112,11 @@ class TradingBot:
             logger.info("Telegram bot started")
         except Exception as e:
             logger.error("Telegram start failed: %s", e)
+
+        # 啟動 WebSocket 價格串流
+        if self.price_feed:
+            await self.price_feed.start()
+            logger.info("WebSocket price feed started")
 
         # 啟動持倉監控
         monitor_task = asyncio.create_task(
@@ -207,6 +216,11 @@ class TradingBot:
             # 3. 處理調整持倉
             if action == "ADJUST":
                 await self._handle_adjust(decision)
+                return
+
+            # 3.5 處理緊急平倉
+            if action == "CLOSE":
+                await self._handle_close(decision)
                 return
 
             # 4. 檢查是否被風控拒絕
@@ -315,6 +329,61 @@ class TradingBot:
         else:
             await self.telegram.send_error(
                 f"調整失敗: {result.get('error', 'Unknown')}"
+            )
+
+    async def _handle_close(self, decision: dict):
+        """處理 AI 的 CLOSE 決策 — 緊急平倉"""
+        trade_id = decision.get("trade_id")
+        reasoning = decision.get("reasoning", {})
+        close_reason = reasoning.get("close_reason", "N/A")
+
+        logger.info("AI CLOSE trade #%s: %s", trade_id, close_reason)
+
+        # 發送 Telegram 通知
+        text = (
+            f"🚨 AI 緊急平倉\n\n"
+            f"交易 #{trade_id} | {decision.get('symbol', '?')}\n"
+            f"信心: {decision.get('confidence', 0)}%\n\n"
+            f"平倉原因: {close_reason}\n"
+            f"分析師: {reasoning.get('analyst_consensus', 'N/A')}\n"
+            f"技術面: {reasoning.get('technical', 'N/A')}"
+        )
+
+        try:
+            await self.telegram.bot.send_message(
+                chat_id=self.telegram.chat_id, text=text
+            )
+        except Exception as e:
+            logger.warning("Failed to send CLOSE notification: %s", e)
+
+        # 執行平倉
+        result = self.trader.close_trade(trade_id)
+
+        if result.get("success"):
+            profit_pct = result.get("profit_pct", 0)
+            outcome = result.get("outcome", "?")
+            try:
+                await self.telegram.bot.send_message(
+                    chat_id=self.telegram.chat_id,
+                    text=(
+                        f"✅ 交易 #{trade_id} 已平倉\n"
+                        f"結果: {outcome} ({profit_pct:+.2f}%)\n"
+                        f"出場價: {result.get('exit_price', '?')}"
+                    ),
+                )
+            except Exception as e:
+                logger.warning("Failed to send CLOSE result: %s", e)
+
+            # 觸發覆盤
+            if hasattr(self, 'learning') and self.learning:
+                try:
+                    await self.learning.on_trade_closed(trade_id)
+                except Exception as e:
+                    logger.warning("Failed to trigger review for closed trade #%d: %s",
+                                   trade_id, e)
+        else:
+            await self.telegram.send_error(
+                f"平倉失敗: {result.get('error', 'Unknown')}"
             )
 
     async def _on_position_event(self, event_type: str, trade, data: dict):
@@ -556,6 +625,11 @@ class TradingBot:
             # 3. ADJUST
             if action == "ADJUST":
                 await self._handle_adjust(decision)
+                return
+
+            # 3.5 CLOSE
+            if action == "CLOSE":
+                await self._handle_close(decision)
                 return
 
             # 4. 被風控拒絕

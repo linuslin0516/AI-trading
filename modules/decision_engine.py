@@ -187,6 +187,15 @@ class DecisionEngine:
             )
             return decision
 
+        if action == "CLOSE":
+            decision["_analyst_messages"] = analyst_msgs
+            logger.info(
+                "AI recommends CLOSE trade #%s: %s",
+                decision.get("trade_id"),
+                decision.get("reasoning", {}).get("close_reason", "N/A"),
+            )
+            return decision
+
         if action in ("LONG", "SHORT"):
             # 附加市場狀態
             symbol = decision.get("symbol", "")
@@ -357,6 +366,15 @@ class DecisionEngine:
 
         if action == "ADJUST":
             decision["_analyst_messages"] = analyst_msgs
+            return decision
+
+        if action == "CLOSE":
+            decision["_analyst_messages"] = analyst_msgs
+            logger.info(
+                "Scanner AI recommends CLOSE trade #%s: %s",
+                decision.get("trade_id"),
+                decision.get("reasoning", {}).get("close_reason", "N/A"),
+            )
             return decision
 
         if action in ("LONG", "SHORT"):

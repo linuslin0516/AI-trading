@@ -16,9 +16,10 @@ FUTURES_INFO_URL = "https://fapi.binance.com"
 class PaperTrader:
     """紙上交易模組 — 使用 Binance 主網真實價格，不實際下單"""
 
-    def __init__(self, config: dict, db: Database):
+    def __init__(self, config: dict, db: Database, price_feed=None):
         self.config = config
         self.db = db
+        self.price_feed = price_feed  # WebSocket 即時價格（可選）
 
         trading_cfg = config.get("trading", {})
         self.leverage_map = trading_cfg.get("leverage_map", {})
@@ -134,7 +135,12 @@ class PaperTrader:
     # ── 價格與精度 ──
 
     def _get_price(self, symbol: str) -> float:
-        """取得 Binance 主網即時價格"""
+        """取得 Binance 主網即時價格（優先 WebSocket，fallback REST）"""
+        if self.price_feed:
+            ws_price = self.price_feed.get_price(symbol)
+            if ws_price is not None and self.price_feed.get_price_age(symbol) < 10:
+                return ws_price
+        # Fallback: REST API
         r = self.session.get(
             f"{MARKET_DATA_URL}/api/v3/ticker/price",
             params={"symbol": symbol}, timeout=10,
@@ -519,14 +525,15 @@ class PaperTrader:
     # ── 持倉監控 ──
 
     async def monitor_positions(self, callback=None):
-        """持續監控虛擬持倉（每 30 秒，使用主網真實價格）
+        """持續監控虛擬持倉（使用主網真實價格）
 
-        與 BinanceTrader 的差異：
-        - 不查詢交易所持倉，使用記憶體中的虛擬持倉
-        - TP1/TP2 由本地價格比對觸發（BinanceTrader 是交易所掛單觸發）
-        - SL 同樣使用連續 4 次確認機制
+        有 WebSocket 時每 1 秒檢查一次（即時價格），
+        無 WebSocket 時每 10 秒檢查一次（REST fallback）。
         """
-        logger.info("Paper position monitor started (mainnet prices)")
+        use_ws = self.price_feed is not None
+        interval = 1 if use_ws else 10
+        logger.info("Paper position monitor started (mode=%s, interval=%ds)",
+                     "WebSocket" if use_ws else "REST", interval)
 
         _pos_state: dict[int, dict] = {}
 
@@ -536,7 +543,7 @@ class PaperTrader:
                 if not open_trades:
                     self._positions.clear()
                     _pos_state.clear()
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(interval)
                     continue
 
                 for trade in open_trades:
@@ -731,4 +738,4 @@ class PaperTrader:
             except Exception as e:
                 logger.error("Paper position monitor error: %s", e)
 
-            await asyncio.sleep(30)
+            await asyncio.sleep(interval)
