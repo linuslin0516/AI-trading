@@ -58,7 +58,6 @@ class DecisionEngine:
 
         回傳:
           - 開倉決策 (action=LONG/SHORT) 或
-          - 調整決策 (action=ADJUST) 或
           - None (SKIP / 風控拒絕)
         """
         logger.info("Processing %d analyst messages", len(messages))
@@ -185,26 +184,6 @@ class DecisionEngine:
             reason = decision.get("reasoning", {}).get("skip_reason", "N/A")
             logger.info("AI recommends SKIP: %s", reason)
             return decision  # 回傳完整決策供記錄學習
-
-        if action == "ADJUST":
-            # 調整現有持倉，不需要風控檢查
-            decision["_analyst_messages"] = analyst_msgs
-            logger.info(
-                "AI recommends ADJUST trade #%s: SL=%s TP=%s",
-                decision.get("trade_id"),
-                decision.get("new_stop_loss"),
-                decision.get("new_take_profit"),
-            )
-            return decision
-
-        if action == "CLOSE":
-            decision["_analyst_messages"] = analyst_msgs
-            logger.info(
-                "AI recommends CLOSE trade #%s: %s",
-                decision.get("trade_id"),
-                decision.get("reasoning", {}).get("close_reason", "N/A"),
-            )
-            return decision
 
         if action in ("LONG", "SHORT"):
             # 附加市場狀態
@@ -374,19 +353,6 @@ class DecisionEngine:
         if action == "SKIP":
             reason = decision.get("reasoning", {}).get("skip_reason", "N/A")
             logger.info("Scanner AI recommends SKIP: %s", reason)
-            return decision
-
-        if action == "ADJUST":
-            decision["_analyst_messages"] = analyst_msgs
-            return decision
-
-        if action == "CLOSE":
-            decision["_analyst_messages"] = analyst_msgs
-            logger.info(
-                "Scanner AI recommends CLOSE trade #%s: %s",
-                decision.get("trade_id"),
-                decision.get("reasoning", {}).get("close_reason", "N/A"),
-            )
             return decision
 
         if action in ("LONG", "SHORT"):

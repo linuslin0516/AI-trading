@@ -213,17 +213,7 @@ class TradingBot:
                 )
                 return
 
-            # 3. 處理調整持倉
-            if action == "ADJUST":
-                await self._handle_adjust(decision)
-                return
-
-            # 3.5 處理緊急平倉
-            if action == "CLOSE":
-                await self._handle_close(decision)
-                return
-
-            # 4. 檢查是否被風控拒絕
+            # 3. 檢查是否被風控拒絕
             if decision.get("_rejected"):
                 logger.warning("Signal rejected by risk manager")
                 self.db.save_ai_decision(
@@ -287,125 +277,6 @@ class TradingBot:
         except Exception as e:
             logger.exception("Error in signal processing pipeline")
             await self.telegram.send_error(f"分析流程錯誤: {e}")
-
-    async def _handle_adjust(self, decision: dict):
-        """處理 AI 的 ADJUST 決策 — 調整現有持倉的止盈止損"""
-        trade_id = decision.get("trade_id")
-        new_sl = decision.get("new_stop_loss")
-        new_tp = decision.get("new_take_profit")
-        reasoning = decision.get("reasoning", {})
-
-        logger.info("Adjusting trade #%s: SL=%s, TP=%s", trade_id, new_sl, new_tp)
-
-        # 發送 Telegram 通知
-        text = (
-            f"🔄 AI 建議調整持倉\n\n"
-            f"交易 #{trade_id} | {decision.get('symbol', '?')}\n"
-            f"信心: {decision.get('confidence', 0)}%\n\n"
-            f"調整內容:\n"
-        )
-        if new_sl:
-            text += f"  停損 → {new_sl}\n"
-        if new_tp:
-            text += f"  目標 → {new_tp}\n"
-        text += (
-            f"\n原因: {reasoning.get('adjustment_reason', 'N/A')}\n"
-            f"分析師: {reasoning.get('analyst_consensus', 'N/A')}\n"
-        )
-
-        try:
-            await self.telegram.bot.send_message(
-                chat_id=self.telegram.chat_id, text=text
-            )
-        except Exception as e:
-            logger.warning("Failed to send ADJUST notification: %s", e)
-
-        # 執行調整（即使 TG 通知失敗也要執行）
-        result = self.trader.adjust_trade(trade_id, new_sl, new_tp)
-
-        if result.get("success"):
-            changes = "\n".join(f"  • {c}" for c in result.get("changes", []))
-            try:
-                await self.telegram.bot.send_message(
-                    chat_id=self.telegram.chat_id,
-                    text=f"✅ 交易 #{trade_id} 已調整\n{changes}",
-                )
-            except Exception as e:
-                logger.warning("Failed to send ADJUST result: %s", e)
-        else:
-            await self.telegram.send_error(
-                f"調整失敗: {result.get('error', 'Unknown')}"
-            )
-
-    async def _handle_close(self, decision: dict):
-        """處理 AI 的 CLOSE 決策 — 緊急平倉"""
-        trade_id = decision.get("trade_id")
-        reasoning = decision.get("reasoning", {})
-        close_reason = reasoning.get("close_reason", "N/A")
-
-        logger.info("AI CLOSE trade #%s: %s", trade_id, close_reason)
-
-        # 發送 Telegram 通知
-        text = (
-            f"🚨 AI 緊急平倉\n\n"
-            f"交易 #{trade_id} | {decision.get('symbol', '?')}\n"
-            f"信心: {decision.get('confidence', 0)}%\n\n"
-            f"平倉原因: {close_reason}\n"
-            f"分析師: {reasoning.get('analyst_consensus', 'N/A')}\n"
-            f"技術面: {reasoning.get('technical', 'N/A')}"
-        )
-
-        try:
-            await self.telegram.bot.send_message(
-                chat_id=self.telegram.chat_id, text=text
-            )
-        except Exception as e:
-            logger.warning("Failed to send CLOSE notification: %s", e)
-
-        # 執行平倉
-        result = self.trader.close_trade(trade_id)
-
-        if result.get("success"):
-            profit_pct = result.get("profit_pct", 0)
-            outcome = result.get("outcome", "?")
-            try:
-                await self.telegram.bot.send_message(
-                    chat_id=self.telegram.chat_id,
-                    text=(
-                        f"✅ 交易 #{trade_id} 已平倉\n"
-                        f"結果: {outcome} ({profit_pct:+.2f}%)\n"
-                        f"出場價: {result.get('exit_price', '?')}"
-                    ),
-                )
-            except Exception as e:
-                logger.warning("Failed to send CLOSE result: %s", e)
-
-            # 觸發覆盤 + 發送完整平倉通知（含覆盤結果）
-            if hasattr(self, 'learning') and self.learning:
-                try:
-                    learn_result = await self.learning.on_trade_closed(trade_id)
-                    review = learn_result.get("review")
-                    events = learn_result.get("events", [])
-
-                    # 重新讀取 trade（已更新 review）
-                    trade = self.db.get_trade(trade_id)
-                    if trade:
-                        await self.telegram.send_exit_notification(
-                            trade,
-                            {"exit_price": result.get("exit_price"),
-                             "current_price": result.get("exit_price")},
-                            review,
-                        )
-                        self._sync_analyst_weights()
-                        for event in events:
-                            await self.telegram.send_learning_event(event)
-                except Exception as e:
-                    logger.warning("Failed to trigger review for closed trade #%d: %s",
-                                   trade_id, e)
-        else:
-            await self.telegram.send_error(
-                f"平倉失敗: {result.get('error', 'Unknown')}"
-            )
 
     async def _on_position_event(self, event_type: str, trade, data: dict):
         """持倉監控回調"""
@@ -652,17 +523,7 @@ class TradingBot:
                 )
                 return
 
-            # 3. ADJUST
-            if action == "ADJUST":
-                await self._handle_adjust(decision)
-                return
-
-            # 3.5 CLOSE
-            if action == "CLOSE":
-                await self._handle_close(decision)
-                return
-
-            # 4. 被風控拒絕
+            # 3. 被風控拒絕
             if decision.get("_rejected"):
                 logger.warning("Scanner signal rejected by risk manager")
                 self.db.save_ai_decision(
