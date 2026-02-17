@@ -94,6 +94,9 @@ class TradingBot:
         else:
             logger.warning("Data directory [%s] does NOT exist!", abs_data)
 
+        # 啟動時重新覆盤失敗的交易
+        self._retry_failed_reviews()
+
         # 載入分析師最新權重
         self._sync_analyst_weights()
 
@@ -655,6 +658,76 @@ class TradingBot:
         for a in analysts:
             self.discord.update_analyst_weight(a.name, a.current_weight)
         logger.info("Synced %d analyst weights", len(analysts))
+
+    def _retry_failed_reviews(self):
+        """啟動時檢查並重新覆盤失敗的交易"""
+        import time as _time
+        closed = self.db.get_closed_trades(limit=500)
+        need_review = []
+        for t in closed:
+            review = t.review
+            if not review:
+                need_review.append(t)
+                continue
+            try:
+                r = json.loads(review) if isinstance(review, str) else review
+                if not isinstance(r, dict) or "error" in r or "overall_score" not in r:
+                    need_review.append(t)
+            except (json.JSONDecodeError, TypeError):
+                need_review.append(t)
+
+        if not need_review:
+            logger.info("All closed trades have valid reviews")
+            return
+
+        logger.info("Found %d trades with failed reviews, re-reviewing...", len(need_review))
+        success = 0
+        for trade in need_review:
+            try:
+                analyst_opinions = trade.analyst_opinions or "N/A"
+                technical_signals = trade.technical_signals or "{}"
+                ai_reasoning = trade.ai_reasoning or "N/A"
+                if len(analyst_opinions) > 3000:
+                    analyst_opinions = analyst_opinions[:3000] + "\n...(截斷)"
+                if len(ai_reasoning) > 2000:
+                    ai_reasoning = ai_reasoning[:2000] + "\n...(截斷)"
+
+                trade_data = {
+                    "symbol": trade.symbol,
+                    "direction": trade.direction,
+                    "entry_price": trade.entry_price,
+                    "exit_price": trade.exit_price,
+                    "stop_loss": trade.stop_loss,
+                    "take_profit": trade.take_profit or "[]",
+                    "position_size": trade.position_size,
+                    "confidence": trade.confidence,
+                    "hold_duration": f"{(trade.hold_duration or 0) // 60}m",
+                    "outcome": trade.outcome,
+                    "profit_pct": trade.profit_pct,
+                    "analyst_opinions": analyst_opinions,
+                    "technical_signals": (
+                        json.loads(technical_signals)
+                        if isinstance(technical_signals, str)
+                        else technical_signals
+                    ),
+                    "ai_reasoning": ai_reasoning,
+                    "quick_feedback": "N/A",
+                }
+
+                review = self.ai.review_trade(trade_data)
+                if review and "overall_score" in review and "error" not in review:
+                    self.db.update_trade(trade.id, review=review)
+                    logger.info("Re-review Trade #%d OK: score=%s/10",
+                                trade.id, review.get("overall_score"))
+                    success += 1
+                    _time.sleep(2)  # 避免 API rate limit
+                else:
+                    logger.warning("Re-review Trade #%d failed: %s",
+                                   trade.id, review)
+            except Exception as e:
+                logger.error("Re-review Trade #%d error: %s", trade.id, e)
+
+        logger.info("Re-review complete: %d/%d succeeded", success, len(need_review))
 
     def _get_local_tz(self):
         """取得設定的時區"""
