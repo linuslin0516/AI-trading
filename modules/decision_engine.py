@@ -410,14 +410,15 @@ class DecisionEngine:
                 hints.append(
                     f"📈 {symbol} 趨勢行情 (ADX={adx}, 趨勢={trend})\n"
                     f"  策略: 順勢交易，不要逆勢。"
-                    f"止盈可設寬一點（BTC 1-2%, ETH 2-3%），讓利潤奔跑。"
+                    f"止盈設寬（BTC 2-4%, ETH 3-5%），讓利潤奔跑。"
+                    f"止損設在關鍵支撐/阻力位外側。"
                     f"回調到 EMA 附近是好的入場時機。"
                 )
             elif condition == "RANGING":
                 hints.append(
                     f"📊 {symbol} 盤整行情 (ADX={adx})\n"
                     f"  策略: 均值回歸，高拋低吸。"
-                    f"止盈設緊一點（BTC 0.5-1%, ETH 1-1.5%），快進快出。"
+                    f"止盈適中（BTC 1-2%, ETH 1.5-2.5%），不貪不急。"
                     f"在布林帶上下軌附近反向操作勝率較高。"
                 )
             else:
