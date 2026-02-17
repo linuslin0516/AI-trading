@@ -708,12 +708,13 @@ class PaperTrader:
                                     state["sl_breach_count"], trade.id,
                                     trade.direction, symbol, current_price, sl,
                                 )
-                                if state["sl_breach_count"] >= 4:
+                                if state["sl_breach_count"] >= 2:
                                     logger.warning(
                                         "SL confirmed for paper trade #%d after %d checks",
                                         trade.id, state["sl_breach_count"],
                                     )
-                                    result = self.close_trade(trade.id, current_price)
+                                    # 用 SL 價格平倉（模擬交易所掛單成交）
+                                    result = self.close_trade(trade.id, sl)
                                     if callback:
                                         await callback("stop_loss", trade, result)
                                     _pos_state.pop(trade.id, None)
