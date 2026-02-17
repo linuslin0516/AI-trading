@@ -200,6 +200,17 @@ class LearningEngine:
 
             review = self.ai.review_trade(trade_data)
 
+            # 檢查覆盤結果是否有效（超時/API 錯誤會返回無效格式）
+            if not review or "error" in review or "overall_score" not in review:
+                logger.warning(
+                    "Review invalid for trade #%d (error=%s), retrying once...",
+                    trade.id, review.get("error") if review else "None",
+                )
+                review = self.ai.review_trade(trade_data)
+                if not review or "error" in review or "overall_score" not in review:
+                    logger.error("Review retry also failed for trade #%d", trade.id)
+                    return None
+
             # 保存覆盤結果
             self.db.update_trade(trade.id, review=review)
 

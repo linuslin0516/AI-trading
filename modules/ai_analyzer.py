@@ -479,7 +479,11 @@ class AIAnalyzer:
     def __init__(self, config: dict):
         self.config = config
         claude_cfg = config["claude"]
-        self.client = anthropic.Anthropic(api_key=claude_cfg["api_key"])
+        self.client = anthropic.Anthropic(
+            api_key=claude_cfg["api_key"],
+            timeout=120.0,   # 2 分鐘（預設 600s 太長，Railway 可能先斷線）
+            max_retries=2,
+        )
         self.model = claude_cfg.get("model", "claude-sonnet-4-20250514")
         self.max_tokens = claude_cfg.get("max_tokens", 4096)
         self.temperature = claude_cfg.get("temperature", 0.7)

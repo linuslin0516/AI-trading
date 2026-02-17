@@ -35,7 +35,11 @@ class MessageScorer:
         self.model = scoring_cfg.get("model", "claude-haiku-4-5-20251001")
 
         claude_cfg = config.get("claude", {})
-        self.client = anthropic.Anthropic(api_key=claude_cfg["api_key"])
+        self.client = anthropic.Anthropic(
+            api_key=claude_cfg["api_key"],
+            timeout=30.0,    # 30 秒（Haiku 很快，不需要太長）
+            max_retries=2,
+        )
         logger.info("MessageScorer initialized (model=%s, min_score=%d, enabled=%s)",
                      self.model, self.min_score, self.enabled)
 
