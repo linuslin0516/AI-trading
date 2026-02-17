@@ -9,8 +9,7 @@ from modules.database import Database
 
 logger = logging.getLogger(__name__)
 
-MARKET_DATA_URL = "https://data-api.binance.vision"
-FUTURES_INFO_URL = "https://fapi.binance.com"
+FUTURES_URL = "https://fapi.binance.com"
 
 
 class PaperTrader:
@@ -175,7 +174,7 @@ class PaperTrader:
                 return ws_price
         # Fallback: REST API
         r = self.session.get(
-            f"{MARKET_DATA_URL}/api/v3/ticker/price",
+            f"{FUTURES_URL}/fapi/v1/ticker/price",
             params={"symbol": symbol}, timeout=10,
         )
         r.raise_for_status()
@@ -188,7 +187,7 @@ class PaperTrader:
 
         try:
             r = self.session.get(
-                f"{FUTURES_INFO_URL}/fapi/v1/exchangeInfo", timeout=10,
+                f"{FUTURES_URL}/fapi/v1/exchangeInfo", timeout=10,
             )
             r.raise_for_status()
             for s in r.json().get("symbols", []):

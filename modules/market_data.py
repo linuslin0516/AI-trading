@@ -10,8 +10,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 # 可用的端點
-MARKET_DATA_URL = "https://data-api.binance.vision"
-FUTURES_URL = "https://testnet.binancefuture.com"
+FUTURES_URL = "https://fapi.binance.com"
 
 
 class MarketData:
@@ -22,10 +21,10 @@ class MarketData:
         self.api_key = binance_cfg.get("api_key", "")
         self.api_secret = binance_cfg.get("api_secret", "")
         self.session = requests.Session()
-        logger.info("MarketData initialized (data-api + futures testnet)")
+        logger.info("MarketData initialized (futures mainnet)")
 
     def _market_get(self, path: str, params: dict | None = None) -> dict | list:
-        url = f"{MARKET_DATA_URL}{path}"
+        url = f"{FUTURES_URL}{path}"
         r = self.session.get(url, params=params, timeout=10)
         r.raise_for_status()
         return r.json()
@@ -45,11 +44,11 @@ class MarketData:
             }
 
             # 即時價格
-            ticker = self._market_get("/api/v3/ticker/price", {"symbol": symbol})
+            ticker = self._market_get("/fapi/v1/ticker/price", {"symbol": symbol})
             data["price"] = float(ticker["price"])
 
             # 24h 統計
-            stats = self._market_get("/api/v3/ticker/24hr", {"symbol": symbol})
+            stats = self._market_get("/fapi/v1/ticker/24hr", {"symbol": symbol})
             data["price_change_24h"] = float(stats["priceChangePercent"])
             data["volume_24h"] = float(stats["quoteVolume"])
             data["high_24h"] = float(stats["highPrice"])
@@ -103,7 +102,7 @@ class MarketData:
         result = {}
         for interval, limit in interval_limits.items():
             try:
-                klines = self._market_get("/api/v3/klines", {
+                klines = self._market_get("/fapi/v1/klines", {
                     "symbol": symbol, "interval": interval, "limit": limit
                 })
                 result[interval] = [
@@ -483,7 +482,7 @@ class MarketData:
 
     def get_current_price(self, symbol: str) -> float | None:
         try:
-            ticker = self._market_get("/api/v3/ticker/price", {"symbol": symbol})
+            ticker = self._market_get("/fapi/v1/ticker/price", {"symbol": symbol})
             return float(ticker["price"])
         except Exception as e:
             logger.error("Failed to get price for %s: %s", symbol, e)

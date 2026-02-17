@@ -15,7 +15,7 @@ from utils.helpers import format_price, format_pct
 
 logger = logging.getLogger(__name__)
 
-MARKET_DATA_URL = "https://data-api.binance.vision"
+FUTURES_URL = "https://fapi.binance.com"
 
 
 class TelegramNotifier:
@@ -650,7 +650,7 @@ class TelegramNotifier:
         try:
             # 取得當前 BTC 價格
             r = requests.get(
-                f"{MARKET_DATA_URL}/api/v3/ticker/price",
+                f"{FUTURES_URL}/fapi/v1/ticker/price",
                 params={"symbol": "BTCUSDT"}, timeout=10,
             )
             price = float(r.json()["price"])
@@ -747,7 +747,7 @@ class TelegramNotifier:
         for t in open_trades:
             try:
                 r = requests.get(
-                    f"{MARKET_DATA_URL}/api/v3/ticker/price",
+                    f"{FUTURES_URL}/fapi/v1/ticker/price",
                     params={"symbol": t.symbol}, timeout=10,
                 )
                 current_price = float(r.json()["price"])

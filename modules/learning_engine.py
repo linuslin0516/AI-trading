@@ -8,7 +8,7 @@ from modules.ai_analyzer import AIAnalyzer
 from modules.database import Database
 from utils.risk_manager import RiskManager
 
-MAINNET_PRICE_URL = "https://data-api.binance.vision"
+FUTURES_URL = "https://fapi.binance.com"
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ class LearningEngine:
         """
         try:
             r = requests.get(
-                f"{MAINNET_PRICE_URL}/api/v3/ticker/price",
+                f"{FUTURES_URL}/fapi/v1/ticker/price",
                 params={"symbol": trade.symbol}, timeout=5,
             )
             mainnet_price = float(r.json()["price"])

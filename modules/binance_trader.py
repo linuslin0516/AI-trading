@@ -13,7 +13,7 @@ from modules.database import Database
 logger = logging.getLogger(__name__)
 
 FUTURES_URL = "https://testnet.binancefuture.com"
-MARKET_DATA_URL = "https://data-api.binance.vision"
+FUTURES_MAINNET_URL = "https://fapi.binance.com"
 
 
 class BinanceTrader:
@@ -511,7 +511,7 @@ class BinanceTrader:
             # 3. 取得成交後的價格
             if not exit_price:
                 r = self.session.get(
-                    f"{MARKET_DATA_URL}/api/v3/ticker/price",
+                    f"{FUTURES_MAINNET_URL}/fapi/v1/ticker/price",
                     params={"symbol": symbol}, timeout=10,
                 )
                 exit_price = float(r.json()["price"])
@@ -626,7 +626,7 @@ class BinanceTrader:
                         current_price = bp.get("mark_price", 0)
                         if not current_price:
                             r = self.session.get(
-                                f"{MARKET_DATA_URL}/api/v3/ticker/price",
+                                f"{FUTURES_MAINNET_URL}/fapi/v1/ticker/price",
                                 params={"symbol": symbol}, timeout=10,
                             )
                             current_price = float(r.json()["price"])
