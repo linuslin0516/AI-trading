@@ -43,12 +43,9 @@ class LearningEngine:
 
     async def on_trade_closed(self, trade_id: int) -> dict:
         """
-        交易關閉後的完整學習流程
+        交易關閉時的輕量處理（不做覆盤，等待延遲覆盤）
 
-        Returns: {
-            "review": AI 覆盤結果 or None,
-            "events": 學習事件列表 [{type, description}, ...]
-        }
+        只記錄基本資訊和模式，覆盤由 run_pending_reviews 延遲 4 小時執行。
         """
         result = {"review": None, "events": []}
 
@@ -59,78 +56,151 @@ class LearningEngine:
         if not trade or trade.status != "CLOSED":
             return result
 
-        logger.info("Learning pipeline for trade #%d", trade_id)
+        logger.info("Trade #%d closed, review scheduled in ~4 hours", trade_id)
 
-        # 0. Testnet 價格偏差檢查：跟主網比對，偏差太大則跳過學習
-        deviation = self._check_price_deviation(trade)
-        if deviation is not None and abs(deviation) > 5.0:
-            logger.warning(
-                "Skipping learning for trade #%d: testnet price deviation %.1f%% "
-                "(exit=%.2f vs mainnet)",
-                trade_id, deviation, trade.exit_price,
-            )
-            result["events"].append({
-                "type": "LEARNING_SKIPPED",
-                "description": (
-                    f"⚠️ Trade #{trade.id} 學習已跳過\n"
-                    f"Testnet 出場價與主網偏差 {deviation:+.1f}%，"
-                    f"結果不可靠，避免錯誤學習"
-                ),
-            })
-            return result
-
-        # 1. AI 覆盤
-        review = self._run_review(trade)
-        result["review"] = review
-
-        if review:
-            result["events"].append({
-                "type": "TRADE_REVIEW",
-                "description": (
-                    f"Trade #{trade.id} 覆盤完成: "
-                    f"{trade.outcome} {trade.profit_pct:+.2f}%, "
-                    f"評分={review.get('overall_score', 'N/A')}/10"
-                ),
-            })
-
-        # 2. 更新分析師權重
-        if review:
-            weight_changes = self._update_analyst_weights(trade, review)
-            if weight_changes:
-                result["events"].append({
-                    "type": "WEIGHT_UPDATE",
-                    "description": "分析師權重更新:\n" + "\n".join(weight_changes),
-                })
-
-        # 3. 記錄訊號模式
+        # 記錄訊號模式（不需要延遲）
         self._record_pattern(trade)
 
-        # 4. 檢查是否需要進行更大規模的學習
-        stats = self.db.get_performance_stats()
-        total_trades = stats.get("total", 0)
+        result["events"].append({
+            "type": "TRADE_CLOSED",
+            "description": (
+                f"Trade #{trade.id} 已平倉: "
+                f"{trade.outcome} {trade.profit_pct:+.2f}%\n"
+                f"覆盤將在 4 小時後執行（等待後續價格數據）"
+            ),
+        })
 
-        if total_trades >= self.min_trades:
-            # 每 N 筆分析模式
-            if total_trades % self.pattern_freq == 0:
-                patterns = self._analyze_patterns()
-                if patterns:
-                    result["events"].append({
-                        "type": "PATTERN_FOUND",
-                        "description": f"發現 {len(patterns)} 個高勝率模式",
-                    })
+        return result
 
-            # 每 M 筆優化參數
-            if total_trades % self.param_opt_freq == 0:
-                changes = self._optimize_parameters()
-                if changes:
-                    result["events"].append({
-                        "type": "PARAM_OPTIMIZED",
-                        "description": "策略參數已自動優化:\n" + "\n".join(
-                            f"  {k}: {v['old']} → {v['new']}" for k, v in changes.items()
+    async def run_pending_reviews(self, notify_callback=None):
+        """
+        檢查並執行延遲覆盤（平倉超過 4 小時且尚未覆盤的交易）
+
+        Args:
+            notify_callback: async func(trade, review, events) — 發送 TG 通知
+        """
+        if not self.enabled:
+            return
+
+        review_delay_hours = 4
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=review_delay_hours)
+
+        trades = self.db.get_unreviewed_closed_trades(before=cutoff)
+        if not trades:
+            return
+
+        for trade in trades:
+            try:
+                logger.info("Running delayed review for trade #%d (closed %s)",
+                            trade.id, trade.closed_at)
+
+                # 取得平倉後 4 小時的 1h K 線
+                post_close_data = self._fetch_post_close_klines(trade)
+
+                # AI 覆盤（含後續價格走勢）
+                review = self._run_review(trade, post_close_data=post_close_data)
+                events = []
+
+                if review:
+                    events.append({
+                        "type": "TRADE_REVIEW",
+                        "description": (
+                            f"Trade #{trade.id} 覆盤完成: "
+                            f"{trade.outcome} {trade.profit_pct:+.2f}%, "
+                            f"評分={review.get('overall_score', 'N/A')}/10"
                         ),
                     })
 
-        return result
+                    # 更新分析師權重
+                    weight_changes = self._update_analyst_weights(trade, review)
+                    if weight_changes:
+                        events.append({
+                            "type": "WEIGHT_UPDATE",
+                            "description": "分析師權重更新:\n" + "\n".join(weight_changes),
+                        })
+
+                # 大規模學習檢查
+                stats = self.db.get_performance_stats()
+                total_trades = stats.get("total", 0)
+
+                if total_trades >= self.min_trades:
+                    if total_trades % self.pattern_freq == 0:
+                        patterns = self._analyze_patterns()
+                        if patterns:
+                            events.append({
+                                "type": "PATTERN_FOUND",
+                                "description": f"發現 {len(patterns)} 個高勝率模式",
+                            })
+                    if total_trades % self.param_opt_freq == 0:
+                        changes = self._optimize_parameters()
+                        if changes:
+                            events.append({
+                                "type": "PARAM_OPTIMIZED",
+                                "description": "策略參數已自動優化:\n" + "\n".join(
+                                    f"  {k}: {v['old']} → {v['new']}"
+                                    for k, v in changes.items()
+                                ),
+                            })
+
+                # 發送通知
+                if notify_callback and (review or events):
+                    await notify_callback(trade, review, events)
+
+            except Exception as e:
+                logger.error("Delayed review failed for trade #%d: %s", trade.id, e)
+
+    def _fetch_post_close_klines(self, trade) -> str:
+        """取得平倉後 4 小時的 1h K 線走勢"""
+        try:
+            close_time = trade.closed_at
+            if close_time and close_time.tzinfo is None:
+                close_time = close_time.replace(tzinfo=timezone.utc)
+            if not close_time:
+                return "無法取得平倉時間"
+
+            start_ms = int(close_time.timestamp() * 1000)
+            r = requests.get(
+                f"{FUTURES_URL}/fapi/v1/klines",
+                params={
+                    "symbol": trade.symbol,
+                    "interval": "1h",
+                    "startTime": start_ms,
+                    "limit": 4,
+                },
+                timeout=10,
+            )
+            r.raise_for_status()
+            klines = r.json()
+
+            if not klines:
+                return "尚無足夠的後續K線數據"
+
+            lines = [f"出場價: {trade.exit_price}"]
+            for i, k in enumerate(klines):
+                o, h, l, c = float(k[1]), float(k[2]), float(k[3]), float(k[4])
+                lines.append(
+                    f"+{i+1}h: 開 {o:.1f} → 收 {c:.1f} "
+                    f"(最高 {h:.1f} / 最低 {l:.1f})"
+                )
+
+            # 計算整體走勢摘要
+            if klines:
+                first_open = float(klines[0][1])
+                last_close = float(klines[-1][4])
+                total_move = last_close - trade.exit_price
+                direction = "上漲" if total_move > 0 else "下跌"
+                lines.append(
+                    f"\n→ 平倉後 {len(klines)} 小時價格{direction} "
+                    f"{abs(total_move):.1f} 點 "
+                    f"({total_move / trade.exit_price * 100:+.2f}%)"
+                )
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            logger.warning("Failed to fetch post-close klines for trade #%d: %s",
+                           trade.id, e)
+            return "無法取得後續價格數據"
 
     def _check_price_deviation(self, trade) -> float | None:
         """比對 testnet exit price 與主網當前價格的偏差百分比
@@ -157,7 +227,7 @@ class LearningEngine:
             logger.warning("Failed to check price deviation: %s", e)
             return None
 
-    def _run_review(self, trade) -> dict | None:
+    def _run_review(self, trade, post_close_data: str = "") -> dict | None:
         """調用 AI 進行覆盤"""
         try:
             analyst_opinions = trade.analyst_opinions or "N/A"
@@ -196,6 +266,7 @@ class LearningEngine:
                 "technical_signals": json.loads(technical_signals) if isinstance(technical_signals, str) else technical_signals,
                 "ai_reasoning": ai_reasoning,
                 "quick_feedback": quick_fb if quick_fb else "N/A",
+                "post_close_price_action": post_close_data or "N/A",
             }
 
             review = self.ai.review_trade(trade_data)

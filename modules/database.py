@@ -246,6 +246,16 @@ class Database:
                     .filter(Trade.status == "PENDING")
                     .all())
 
+    def get_unreviewed_closed_trades(self, before: datetime = None) -> list[Trade]:
+        """取得已平倉但尚未覆盤的交易（closed_at 早於 before）"""
+        with self.get_session() as s:
+            query = (s.query(Trade)
+                     .filter(Trade.status == "CLOSED")
+                     .filter(Trade.review.is_(None)))
+            if before:
+                query = query.filter(Trade.closed_at <= before)
+            return query.order_by(Trade.closed_at.asc()).all()
+
     def get_recent_trades(self, days: int = 7) -> list[Trade]:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as s:

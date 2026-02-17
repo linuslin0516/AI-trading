@@ -130,6 +130,9 @@ class TradingBot:
         # 啟動快速回饋學習
         feedback_task = asyncio.create_task(self._quick_feedback_loop())
 
+        # 啟動延遲覆盤（平倉 4 小時後才覆盤，附帶後續價格走勢）
+        review_task = asyncio.create_task(self._delayed_review_loop())
+
         # 啟動市場掃描器
         scanner_cfg = self.config.get("market_scanner", {})
         if scanner_cfg.get("enabled", False):
@@ -360,18 +363,14 @@ class TradingBot:
                 except Exception as e:
                     logger.error("Failed to send unknown close alert: %s", e)
 
-            # AI 覆盤 + 學習流程
+            # 記錄平倉（覆盤延遲 4 小時後執行）
             learn_result = await self.learning.on_trade_closed(trade.id)
-            review = learn_result.get("review")
             events = learn_result.get("events", [])
 
-            # 發送平倉通知
-            await self.telegram.send_exit_notification(trade, data, review)
+            # 發送平倉通知（不含覆盤，覆盤稍後才會到）
+            await self.telegram.send_exit_notification(trade, data, review=None)
 
-            # 同步分析師權重
-            self._sync_analyst_weights()
-
-            # 發送所有學習事件通知
+            # 發送學習事件通知
             for event in events:
                 await self.telegram.send_learning_event(event)
 
@@ -398,6 +397,46 @@ class TradingBot:
             except Exception as e:
                 logger.debug("Quick feedback error: %s", e)
             await asyncio.sleep(60)
+
+    # ── 延遲覆盤 ──
+
+    async def _delayed_review_loop(self):
+        """每 30 分鐘檢查是否有需要覆盤的交易（平倉超過 4 小時）"""
+        logger.info("Delayed review loop started (check every 30min, review after 4h)")
+        await asyncio.sleep(60)  # 初始延遲
+
+        while self._running:
+            try:
+                await self.learning.run_pending_reviews(
+                    notify_callback=self._on_delayed_review
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Delayed review loop error: %s", e)
+            await asyncio.sleep(1800)  # 每 30 分鐘檢查一次
+
+    async def _on_delayed_review(self, trade, review, events):
+        """延遲覆盤完成後的通知回調"""
+        try:
+            # 發送覆盤結果（作為獨立通知）
+            if review:
+                result_data = {
+                    "exit_price": trade.exit_price,
+                    "profit_pct": trade.profit_pct,
+                    "outcome": trade.outcome,
+                    "hold_duration": trade.hold_duration or 0,
+                }
+                await self.telegram.send_exit_notification(trade, result_data, review)
+
+            # 同步分析師權重
+            self._sync_analyst_weights()
+
+            # 發送學習事件
+            for event in events:
+                await self.telegram.send_learning_event(event)
+        except Exception as e:
+            logger.error("Failed to send delayed review notification: %s", e)
 
     # ── 市場掃描器 ──
 
