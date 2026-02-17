@@ -527,7 +527,10 @@ class TelegramNotifier:
 
         # 持倉刷新按鈕
         if query.data == "refresh_positions":
-            await query.answer("刷新中...")
+            try:
+                await query.answer("刷新中...")
+            except Exception:
+                pass  # query 可能已過期，忽略
             try:
                 text = self._build_positions_text()
                 keyboard = InlineKeyboardMarkup([
@@ -538,7 +541,10 @@ class TelegramNotifier:
                 logger.warning("Failed to refresh positions: %s", e)
             return
 
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception:
+            pass  # query 可能已過期，忽略
 
         msg_id = str(query.message.message_id)
 
