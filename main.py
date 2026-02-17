@@ -215,7 +215,6 @@ class TradingBot:
                 self.db.save_ai_decision(
                     decision, outcome="REJECTED", analyst_names=analyst_names,
                 )
-                await self.telegram.send_rejected_signal(decision)
                 return
 
             # 5. 交易設定檢查
@@ -565,7 +564,6 @@ class TradingBot:
                 self.db.save_ai_decision(
                     decision, outcome="REJECTED", analyst_names=analyst_names,
                 )
-                await self.telegram.send_rejected_signal(decision)
                 return
 
             # 5. 交易關閉檢查

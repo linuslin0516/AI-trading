@@ -216,7 +216,8 @@ class PaperTrader:
 
     def _calc_total_unrealized(self) -> float:
         """計算所有持倉的未實現盈虧（USD）"""
-        total = 0
+        total = 0.0
+        balance = self._get_virtual_balance()
         for symbol, pos in self._positions.items():
             try:
                 current_price = self._get_price(symbol)
@@ -231,7 +232,8 @@ class PaperTrader:
                 pnl_pct *= leverage
                 fee_pct = self.calc_fee_pct(leverage)
                 pnl_pct -= fee_pct
-                total += pnl_pct * trade.position_size / 100
+                margin = balance * (trade.position_size or 0) / 100
+                total += margin * pnl_pct / 100
             except Exception:
                 pass
         return total
