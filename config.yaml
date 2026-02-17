@@ -34,19 +34,19 @@ discord:
       name: "VIVI 比特幣分析"
       analyst: "VIVI-BTC"
       initial_weight: 1.0
-      style: "偏高槓桿短線"
+      style: "低槓桿短線，常用 10x，高保證金（大倉位），短線快進快出"
 
     - id: "1179304542345642024"
       name: "VIVI 乙太幣"
       analyst: "VIVI-ETH"
       initial_weight: 1.0
-      style: "偏高槓桿短線"
+      style: "低槓桿短線，常用 10x，高保證金（大倉位），短線快進快出"
 
     - id: "1113106196510035998"
       name: "VIVI短線交易"
       analyst: "VIVI-短線"
       initial_weight: 1.0
-      style: "偏高槓桿短線"
+      style: "低槓桿短線，常用 10x，高保證金（大倉位），短線快進快出"
 
 
 # Claude AI 設定
