@@ -666,7 +666,7 @@ class AIAnalyzer:
             ai_reasoning=trade_data.get("ai_reasoning", "N/A"),
         )
 
-        return self._call_claude(prompt)
+        return self._call_claude(prompt, max_tokens=8192)
 
     def generate_morning_briefing(
         self,
@@ -821,7 +821,8 @@ class AIAnalyzer:
 
         return "\n".join(lines)
 
-    def _call_claude(self, prompt: str, images: list[dict] | None = None) -> dict:
+    def _call_claude(self, prompt: str, images: list[dict] | None = None,
+                     max_tokens: int | None = None) -> dict:
         text = ""
         try:
             # 組裝 content（支援多模態：文字 + 圖片）
@@ -857,7 +858,7 @@ class AIAnalyzer:
 
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=self.max_tokens,
+                max_tokens=max_tokens or self.max_tokens,
                 temperature=self.temperature,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": content}],
