@@ -374,10 +374,25 @@ class TradingBot:
             except Exception as e:
                 logger.warning("Failed to send CLOSE result: %s", e)
 
-            # 觸發覆盤
+            # 觸發覆盤 + 發送完整平倉通知（含覆盤結果）
             if hasattr(self, 'learning') and self.learning:
                 try:
-                    await self.learning.on_trade_closed(trade_id)
+                    learn_result = await self.learning.on_trade_closed(trade_id)
+                    review = learn_result.get("review")
+                    events = learn_result.get("events", [])
+
+                    # 重新讀取 trade（已更新 review）
+                    trade = self.db.get_trade(trade_id)
+                    if trade:
+                        await self.telegram.send_exit_notification(
+                            trade,
+                            {"exit_price": result.get("exit_price"),
+                             "current_price": result.get("exit_price")},
+                            review,
+                        )
+                        self._sync_analyst_weights()
+                        for event in events:
+                            await self.telegram.send_learning_event(event)
                 except Exception as e:
                     logger.warning("Failed to trigger review for closed trade #%d: %s",
                                    trade_id, e)
