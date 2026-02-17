@@ -10,36 +10,43 @@ discord:
       name: "大鏢客"
       analyst: "大鏢客"
       initial_weight: 1.0
+      style: "高槓桿短線，常用 100x，倉位不超過 5%，獲利幾百到兩千多點即出場"
 
     - id: "1237749772148801567"
       name: "三馬哥合約"
       analyst: "三馬哥"
       initial_weight: 1.0
+      style: "高槓桿短線，常用 100x，倉位不超過 5%，獲利幾百到兩千多點即出場"
 
     - id: "1229967087301033994"
       name: "幣圈所長課堂"
       analyst: "所長"
       initial_weight: 1.0
+      style: "偏大方向波段，槓桿不超過 25x，倉位較大可達 20%"
 
     - id: "1104301561892585543"
       name: "舒琴"
       analyst: "舒琴"
       initial_weight: 1.0
+      style: "偏大方向波段，槓桿不超過 25x，倉位較大可達 20%"
 
     - id: "1113105418663776316"
       name: "VIVI 比特幣分析"
       analyst: "VIVI-BTC"
       initial_weight: 1.0
+      style: "偏高槓桿短線"
 
     - id: "1179304542345642024"
       name: "VIVI 乙太幣"
       analyst: "VIVI-ETH"
       initial_weight: 1.0
+      style: "偏高槓桿短線"
 
     - id: "1113106196510035998"
       name: "VIVI短線交易"
       analyst: "VIVI-短線"
       initial_weight: 1.0
+      style: "偏高槓桿短線"
 
 
 # Claude AI 設定
@@ -77,11 +84,11 @@ trading:
     - "BTCUSDT"
     - "ETHUSDT"
 
-  # 各幣種槓桿倍數
+  # 各幣種最大槓桿倍數（AI 自行決定 1~max，根據分析師風格調整）
   leverage_map:
-    BTCUSDT: 50
-    ETHUSDT: 50
-  default_leverage: 25
+    BTCUSDT: 100
+    ETHUSDT: 100
+  default_leverage: 50
 
   # 手續費設定 (Binance Futures)
   fees:

@@ -105,6 +105,7 @@ class DiscordListener:
                 "name": ch["name"],
                 "analyst": ch["analyst"],
                 "weight": ch.get("initial_weight", 1.0),
+                "style": ch.get("style", ""),
             }
 
         self.buffer = MessageBuffer(config)

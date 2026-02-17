@@ -42,6 +42,14 @@ class DecisionEngine:
         self.risk = risk_manager
         self.calendar = economic_calendar
         self.scorer = message_scorer
+
+        # 從 config 建立分析師風格對照表
+        self._analyst_styles: dict[str, str] = {}
+        for ch in config.get("discord", {}).get("monitored_channels", []):
+            style = ch.get("style", "")
+            if style:
+                self._analyst_styles[ch["analyst"]] = style
+
         logger.info("DecisionEngine initialized")
 
     def process_signals(self, messages: list) -> dict | None:
@@ -141,9 +149,11 @@ class DecisionEngine:
             all_econ = recent + upcoming
             econ_text = self.calendar.format_for_ai(all_econ)
 
-        # 取得分析師績效檔案
+        # 取得分析師績效檔案（含風格描述）
         analyst_names_in_batch = list(set(m["analyst"] for m in analyst_msgs))
         analyst_profiles = self.db.get_analyst_profiles(names=analyst_names_in_batch)
+        for p in analyst_profiles:
+            p["style"] = self._analyst_styles.get(p["name"], "")
 
         # 取得近期覆盤教訓
         review_lessons = self.db.get_recent_review_lessons(limit=10)
@@ -327,9 +337,11 @@ class DecisionEngine:
             except Exception as e:
                 logger.warning("Scanner: economic calendar error: %s", e)
 
-        # 取得分析師績效檔案
+        # 取得分析師績效檔案（含風格描述）
         analyst_names_in_batch = list(set(m["analyst"] for m in analyst_msgs))
         analyst_profiles = self.db.get_analyst_profiles(names=analyst_names_in_batch)
+        for p in analyst_profiles:
+            p["style"] = self._analyst_styles.get(p["name"], "")
 
         # 取得近期覆盤教訓
         review_lessons = self.db.get_recent_review_lessons(limit=10)
