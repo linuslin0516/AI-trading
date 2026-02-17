@@ -37,6 +37,9 @@ class PaperTrader:
         # 虛擬持倉追蹤：{symbol: {qty, direction, trade_id, initial_qty, tp1_hit}}
         self._positions: dict[str, dict] = {}
 
+        # LIMIT 掛單追蹤：{trade_id: {symbol, direction, entry_price, qty, ...}}
+        self._pending_orders: dict[int, dict] = {}
+
         # 快取交易對精度（避免重複查詢）
         self._precision_cache: dict[str, int] = {}
 
@@ -76,7 +79,7 @@ class PaperTrader:
             if not tp_list:
                 continue
             tp1_price = tp_list[0]
-            leverage = self.leverage_map.get(t.symbol, self.default_leverage)
+            leverage = t.leverage or self.leverage_map.get(t.symbol, self.default_leverage)
             if t.direction == "LONG":
                 tp1_pct = (tp1_price - t.entry_price) / t.entry_price * 100
             else:
@@ -107,7 +110,7 @@ class PaperTrader:
             ) or []
 
             # 用入場價和倉位大小反推數量
-            leverage = self.leverage_map.get(trade.symbol, self.default_leverage)
+            leverage = trade.leverage or self.leverage_map.get(trade.symbol, self.default_leverage)
             balance = self._get_virtual_balance()
             amount_usdt = balance * (trade.position_size / 100) * leverage
             qty = amount_usdt / trade.entry_price if trade.entry_price else 0
@@ -130,6 +133,36 @@ class PaperTrader:
             logger.info(
                 "Restored paper position: #%d %s %s qty=%.6f (tp1_hit=%s)",
                 trade.id, trade.direction, trade.symbol, qty, tp1_hit,
+            )
+
+        # 恢復 PENDING 掛單
+        pending_trades = self.db.get_pending_trades()
+        for trade in pending_trades:
+            leverage = trade.leverage or self.leverage_map.get(trade.symbol, self.default_leverage)
+            balance = self._get_virtual_balance()
+            amount_usdt = balance * (trade.position_size / 100) * leverage
+            qty = amount_usdt / trade.entry_price if trade.entry_price else 0
+            precision = self._get_qty_precision(trade.symbol)
+            qty = round(qty, precision)
+
+            tp_list = (
+                json.loads(trade.take_profit)
+                if isinstance(trade.take_profit, str)
+                else trade.take_profit
+            ) or []
+
+            self._pending_orders[trade.id] = {
+                "symbol": trade.symbol,
+                "direction": trade.direction,
+                "entry_price": trade.entry_price,
+                "quantity": qty,
+                "trade_id": trade.id,
+                "stop_loss": trade.stop_loss,
+                "take_profit": tp_list,
+            }
+            logger.info(
+                "Restored pending LIMIT order: #%d %s %s @ %.2f",
+                trade.id, trade.direction, trade.symbol, trade.entry_price,
             )
 
     # ── 價格與精度 ──
@@ -230,7 +263,7 @@ class PaperTrader:
                 trade = self.db.get_trade(pos["trade_id"])
                 if not trade:
                     continue
-                leverage = self.leverage_map.get(symbol, self.default_leverage)
+                leverage = trade.leverage or self.leverage_map.get(symbol, self.default_leverage)
                 if pos["direction"] == "LONG":
                     pnl_pct = (current_price - trade.entry_price) / trade.entry_price * 100
                 else:
@@ -271,20 +304,29 @@ class PaperTrader:
         take_profit = decision["take_profit"]  # list
         position_size_pct = decision["position_size"]
 
-        leverage = self.leverage_map.get(symbol, self.default_leverage)
+        # AI 指定槓桿，上限為 config 設定的最大值
+        max_leverage = self.leverage_map.get(symbol, self.default_leverage)
+        leverage = min(int(decision.get("leverage", max_leverage)), max_leverage)
+        leverage = max(1, leverage)  # 至少 1x
 
         try:
-            # 1. 取得真實價格（MARKET 單用當前價，LIMIT 單用指定價）
+            # 1. 判斷訂單類型
             strategy = decision["entry"].get("strategy", "LIMIT")
-            if strategy == "MARKET":
+            is_limit = strategy != "MARKET"
+
+            if not is_limit:
+                # MARKET 單：用當前市場價立即成交
                 entry_price = self._get_price(symbol)
 
-            # 2. 計算數量
-            quantity = self._calc_quantity(symbol, entry_price, position_size_pct)
+            # 2. 計算數量（使用 AI 指定的槓桿）
+            quantity = self._calc_quantity(symbol, entry_price, position_size_pct, leverage)
             if quantity <= 0:
                 return {"success": False, "error": "Invalid quantity"}
 
             # 3. 建立 trade 記錄
+            #    LIMIT 單 → PENDING（等待市場價觸及掛單價）
+            #    MARKET 單 → OPEN（立即成交）
+            initial_status = "PENDING" if is_limit else "OPEN"
             trade = self.db.create_trade(
                 symbol=symbol,
                 direction=action,
@@ -298,23 +340,38 @@ class PaperTrader:
                 analyst_opinions=decision.get("_analyst_messages", []),
                 technical_signals=decision.get("reasoning", {}),
                 entry_order_id=f"PAPER-{int(datetime.now(timezone.utc).timestamp())}",
-                status="OPEN",
+                status=initial_status,
                 market_condition=decision.get("_market_condition"),
             )
 
-            # 4. 記錄虛擬持倉
-            self._positions[symbol] = {
-                "qty": quantity,
-                "initial_qty": quantity,
-                "direction": action,
-                "trade_id": trade.id,
-                "tp1_hit": False,
-            }
-
-            logger.info(
-                "Paper trade executed: #%d %s %s @ %s qty=%s (virtual)",
-                trade.id, action, symbol, entry_price, quantity,
-            )
+            if is_limit:
+                # LIMIT 單：記錄到掛單列表，等待成交
+                self._pending_orders[trade.id] = {
+                    "symbol": symbol,
+                    "direction": action,
+                    "entry_price": entry_price,
+                    "quantity": quantity,
+                    "trade_id": trade.id,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                }
+                logger.info(
+                    "Paper LIMIT order placed: #%d %s %s @ %s qty=%s (pending)",
+                    trade.id, action, symbol, entry_price, quantity,
+                )
+            else:
+                # MARKET 單：立即記錄虛擬持倉
+                self._positions[symbol] = {
+                    "qty": quantity,
+                    "initial_qty": quantity,
+                    "direction": action,
+                    "trade_id": trade.id,
+                    "tp1_hit": False,
+                }
+                logger.info(
+                    "Paper MARKET trade executed: #%d %s %s @ %s qty=%s (virtual)",
+                    trade.id, action, symbol, entry_price, quantity,
+                )
 
             return {
                 "success": True,
@@ -326,17 +383,20 @@ class PaperTrader:
                 "quantity": quantity,
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
+                "pending": is_limit,
             }
 
         except Exception as e:
             logger.error("Paper trade execution error: %s", e)
             return {"success": False, "error": str(e)}
 
-    def _calc_quantity(self, symbol: str, price: float, position_pct: float) -> float:
+    def _calc_quantity(self, symbol: str, price: float, position_pct: float,
+                       leverage: int | None = None) -> float:
         """計算下單數量（基於虛擬餘額）"""
         try:
             balance = self._get_virtual_balance()
-            leverage = self.leverage_map.get(symbol, self.default_leverage)
+            if leverage is None:
+                leverage = self.leverage_map.get(symbol, self.default_leverage)
             amount_usdt = balance * (position_pct / 100) * leverage
             quantity = amount_usdt / price
 
@@ -358,6 +418,19 @@ class PaperTrader:
         if trade.status == "CLOSED":
             return {"success": False, "error": "Trade already closed"}
 
+        # PENDING 掛單直接取消（尚未成交，無盈虧計算）
+        if trade.status == "PENDING":
+            self.cancel_pending_order(trade_id)
+            return {
+                "success": True,
+                "trade_id": trade_id,
+                "exit_price": 0,
+                "profit_pct": 0,
+                "fee_pct": 0,
+                "outcome": "CANCELLED",
+                "hold_duration": 0,
+            }
+
         symbol = trade.symbol
         direction = trade.direction
 
@@ -366,8 +439,8 @@ class PaperTrader:
             if not exit_price:
                 exit_price = self._get_price(symbol)
 
-            # 計算盈虧（扣除手續費 + 滑點）
-            leverage = self.leverage_map.get(symbol, self.default_leverage)
+            # 計算盈虧（扣除手續費 + 滑點）— 使用交易記錄的槓桿
+            leverage = trade.leverage or self.leverage_map.get(symbol, self.default_leverage)
             if direction == "LONG":
                 profit_pct = (exit_price - trade.entry_price) / trade.entry_price * 100
             else:
@@ -432,6 +505,52 @@ class PaperTrader:
         except Exception as e:
             logger.error("Failed to close paper trade #%d: %s", trade_id, e)
             return {"success": False, "error": str(e)}
+
+    def fill_pending_order(self, trade_id: int) -> dict | None:
+        """LIMIT 掛單成交：PENDING → OPEN，加入持倉追蹤"""
+        order = self._pending_orders.pop(trade_id, None)
+        if not order:
+            return None
+
+        trade = self.db.get_trade(trade_id)
+        if not trade or trade.status != "PENDING":
+            return None
+
+        symbol = order["symbol"]
+        self.db.update_trade(trade_id, status="OPEN")
+
+        self._positions[symbol] = {
+            "qty": order["quantity"],
+            "initial_qty": order["quantity"],
+            "direction": order["direction"],
+            "trade_id": trade_id,
+            "tp1_hit": False,
+        }
+
+        logger.info(
+            "LIMIT order filled: #%d %s %s @ %s qty=%s",
+            trade_id, order["direction"], symbol,
+            order["entry_price"], order["quantity"],
+        )
+
+        return {
+            "trade_id": trade_id,
+            "symbol": symbol,
+            "direction": order["direction"],
+            "entry_price": order["entry_price"],
+            "quantity": order["quantity"],
+            "stop_loss": order["stop_loss"],
+            "take_profit": order["take_profit"],
+        }
+
+    def cancel_pending_order(self, trade_id: int) -> bool:
+        """取消 PENDING 掛單"""
+        order = self._pending_orders.pop(trade_id, None)
+        if not order:
+            return False
+        self.db.update_trade(trade_id, status="CLOSED", outcome="CANCELLED")
+        logger.info("Pending order #%d cancelled", trade_id)
+        return True
 
     def adjust_trade(self, trade_id: int, new_stop_loss: float | None = None,
                      new_take_profit: list[float] | None = None) -> dict:
@@ -539,6 +658,24 @@ class PaperTrader:
 
         while True:
             try:
+                # ── 檢查 PENDING 掛單是否成交 ──
+                for tid in list(self._pending_orders):
+                    order = self._pending_orders[tid]
+                    try:
+                        current = self._get_price(order["symbol"])
+                        filled = False
+                        if order["direction"] == "LONG" and current <= order["entry_price"]:
+                            filled = True  # 價格跌到掛單價以下 → 多單成交
+                        elif order["direction"] == "SHORT" and current >= order["entry_price"]:
+                            filled = True  # 價格漲到掛單價以上 → 空單成交
+
+                        if filled:
+                            result = self.fill_pending_order(tid)
+                            if result and callback:
+                                await callback("limit_filled", None, result)
+                    except Exception as e:
+                        logger.debug("Pending order #%d check error: %s", tid, e)
+
                 open_trades = self.db.get_open_trades()
                 if not open_trades:
                     self._positions.clear()
@@ -598,7 +735,7 @@ class PaperTrader:
 
                                 # 計算 TP1 已實現利潤
                                 tp1_price = tp_list[0]
-                                leverage = self.leverage_map.get(symbol, self.default_leverage)
+                                leverage = trade.leverage or self.leverage_map.get(symbol, self.default_leverage)
                                 if trade.direction == "LONG":
                                     tp1_pct = (tp1_price - trade.entry_price) / trade.entry_price * 100
                                 else:
@@ -691,7 +828,7 @@ class PaperTrader:
                                 continue
 
                         # ── Case C: 計算未實現盈虧 ──
-                        leverage = self.leverage_map.get(symbol, self.default_leverage)
+                        leverage = trade.leverage or self.leverage_map.get(symbol, self.default_leverage)
                         if trade.direction == "LONG":
                             unrealized = (current_price - trade.entry_price) / trade.entry_price * 100
                         else:

@@ -80,7 +80,7 @@ trading:
   # 各幣種槓桿倍數
   leverage_map:
     BTCUSDT: 50
-    ETHUSDT: 25
+    ETHUSDT: 50
   default_leverage: 25
 
   # 手續費設定 (Binance Futures)

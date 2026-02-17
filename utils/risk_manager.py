@@ -80,12 +80,20 @@ class RiskManager:
                 else f"{symbol} 不在允許列表",
             )
 
-        # 3. 重複持倉（同幣種不論方向都不重複開）
-        existing = next((t for t in open_trades if t.symbol == symbol), None)
+        # 3. 重複持倉（同幣種不論方向都不重複開，包含 PENDING 掛單）
+        pending_trades = self.db.get_pending_trades()
+        all_active = open_trades + pending_trades
+        existing = next((t for t in all_active if t.symbol == symbol), None)
+        if existing and existing.status == "PENDING":
+            detail = f"已掛單 {symbol} {existing.direction} (等待成交)"
+        elif existing:
+            detail = f"已持有 {symbol} {existing.direction}"
+        else:
+            detail = "OK"
         result.add_check(
             "重複持倉",
             existing is None,
-            f"已持有 {symbol} {existing.direction}" if existing else "OK",
+            detail,
         )
 
         # 4. 風報比（太低的單數學上不划算，阻擋）

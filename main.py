@@ -270,9 +270,15 @@ class TradingBot:
                             message=m.content,
                         )
 
-                    await self.telegram.send_entry_confirmation(trade_result)
-                    self.risk.record_trade_time()
-                    logger.info("Trade #%d executed successfully", trade_result["trade_id"])
+                    if trade_result.get("pending"):
+                        # LIMIT 掛單：等待成交
+                        await self.telegram.send_pending_order(trade_result)
+                        logger.info("Trade #%d LIMIT order pending", trade_result["trade_id"])
+                    else:
+                        # MARKET 單：已成交
+                        await self.telegram.send_entry_confirmation(trade_result)
+                        self.risk.record_trade_time()
+                        logger.info("Trade #%d executed successfully", trade_result["trade_id"])
                 else:
                     error = trade_result.get("error", "Unknown error")
                     logger.error("Trade execution failed: %s", error)
@@ -403,6 +409,15 @@ class TradingBot:
 
     async def _on_position_event(self, event_type: str, trade, data: dict):
         """持倉監控回調"""
+        if event_type == "limit_filled":
+            # LIMIT 掛單成交通知
+            logger.info("LIMIT order filled: #%d %s %s @ %s",
+                        data["trade_id"], data["direction"],
+                        data["symbol"], data["entry_price"])
+            await self.telegram.send_entry_confirmation(data)
+            self.risk.record_trade_time()
+            return
+
         if event_type == "tp1_hit":
             # TP1 部分止盈通知
             tp1_price = data.get("tp1_price", 0)
@@ -696,10 +711,15 @@ class TradingBot:
                             message=m.content,
                         )
 
-                    await self.telegram.send_entry_confirmation(trade_result)
-                    self.risk.record_trade_time()
-                    logger.info("Scanner trade #%d executed successfully",
-                                trade_result["trade_id"])
+                    if trade_result.get("pending"):
+                        await self.telegram.send_pending_order(trade_result)
+                        logger.info("Scanner trade #%d LIMIT order pending",
+                                    trade_result["trade_id"])
+                    else:
+                        await self.telegram.send_entry_confirmation(trade_result)
+                        self.risk.record_trade_time()
+                        logger.info("Scanner trade #%d executed successfully",
+                                    trade_result["trade_id"])
                 else:
                     error = trade_result.get("error", "Unknown error")
                     logger.error("Scanner trade execution failed: %s", error)

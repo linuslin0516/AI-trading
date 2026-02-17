@@ -110,13 +110,14 @@ class TelegramNotifier:
         paper_tag = " [模擬]" if is_paper else ""
         source_label = ("🔍 掃描器主動發現" if is_scanner else "🔔 交易訊號") + paper_tag
 
-        # 計算預估手續費
+        # 計算預估手續費（使用 AI 決定的槓桿）
         fee_cost = 0
         if self._trader:
             trading_cfg = self.config.get("trading", {})
             leverage_map = trading_cfg.get("leverage_map", {})
             default_lev = trading_cfg.get("default_leverage", 25)
-            lev = leverage_map.get(symbol, default_lev)
+            max_lev = leverage_map.get(symbol, default_lev)
+            lev = min(int(decision.get("leverage", max_lev)), max_lev)
             fee_cost = self._trader.calc_fee_pct(lev)
 
         # 掃描器觸發原因
@@ -137,6 +138,7 @@ class TelegramNotifier:
             f"目標 1: {format_price(tp[0]) if tp else 'N/A'}\n"
             f"目標 2: {format_price(tp[1]) if len(tp) > 1 else 'N/A'}\n"
             f"倉位: {pos_size}%\n"
+            f"槓桿: {lev}x\n"
             f"風報比: {rr:.2f}\n"
             f"預估手續費: -{fee_cost:.2f}%\n\n"
             f"🤖 AI 分析\n"
@@ -248,6 +250,22 @@ class TelegramNotifier:
             f"停損: {format_price(trade_result['stop_loss'])}\n"
             f"目標: {', '.join(format_price(t) for t in trade_result['take_profit'])}\n\n"
             f"📊 持倉監控中..."
+        )
+        await self.bot.send_message(chat_id=self.chat_id, text=text)
+
+    async def send_pending_order(self, trade_result: dict):
+        """LIMIT 掛單通知（等待成交）"""
+        is_paper = self.config.get("trading", {}).get("mode") == "paper"
+        paper_tag = " [模擬]" if is_paper else ""
+        text = (
+            f"📋 掛單已送出{paper_tag}\n\n"
+            f"交易 #{trade_result['trade_id']}\n"
+            f"{trade_result['direction']} {trade_result['symbol']}\n"
+            f"掛單價: {format_price(trade_result['entry_price'])}\n"
+            f"數量: {trade_result['quantity']}\n"
+            f"停損: {format_price(trade_result['stop_loss'])}\n"
+            f"目標: {', '.join(format_price(t) for t in trade_result['take_profit'])}\n\n"
+            f"⏳ LIMIT 限價單，等待市場價觸及掛單價..."
         )
         await self.bot.send_message(chat_id=self.chat_id, text=text)
 

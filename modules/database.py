@@ -240,6 +240,12 @@ class Database:
                     .filter(Trade.status.in_(["OPEN", "PARTIAL_CLOSE"]))
                     .all())
 
+    def get_pending_trades(self) -> list[Trade]:
+        with self.get_session() as s:
+            return (s.query(Trade)
+                    .filter(Trade.status == "PENDING")
+                    .all())
+
     def get_recent_trades(self, days: int = 7) -> list[Trade]:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         with self.get_session() as s:
