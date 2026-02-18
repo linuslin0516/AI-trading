@@ -49,8 +49,8 @@ class RiskManager:
         self._last_trade_time: datetime | None = None
         logger.info("RiskManager initialized")
 
-    def check(self, decision: dict) -> RiskCheckResult:
-        """執行所有風控檢查（模擬模式：全部只顯示不阻擋，讓 AI 多學習）"""
+    def check(self, decision: dict, follow_mode: bool = False) -> RiskCheckResult:
+        """執行風控檢查。follow_mode=True 時只檢查持倉衝突，跳過 RR/confidence"""
         result = RiskCheckResult()
 
         confidence = decision.get("confidence", 0)
@@ -63,13 +63,14 @@ class RiskManager:
         today_pnl = self.db.get_today_pnl()
         consecutive_losses = self.db.get_today_consecutive_losses()
 
-        # ── 硬性檢查（即使模擬也阻擋）──
-        # 1. 信心分數（太低的信號沒有學習價值）
-        result.add_check(
-            "信心分數",
-            confidence >= self.min_confidence,
-            f"{confidence}% (最低 {self.min_confidence}%)",
-        )
+        # ── 硬性檢查 ──
+        # 1. 信心分數（跟單模式跳過）
+        if not follow_mode:
+            result.add_check(
+                "信心分數",
+                confidence >= self.min_confidence,
+                f"{confidence}% (最低 {self.min_confidence}%)",
+            )
 
         # 2. 允許的交易對
         if self.allowed_symbols:
@@ -114,12 +115,13 @@ class RiskManager:
         else:
             result.add_check("重複持倉", True, "OK")
 
-        # 4. 風報比（太低的單數學上不划算，阻擋）
-        result.add_check(
-            "風報比",
-            risk_reward >= self.min_risk_reward,
-            f"{risk_reward:.2f} (最低 {self.min_risk_reward})",
-        )
+        # 4. 風報比（跟單模式跳過，信任分析師的點位）
+        if not follow_mode:
+            result.add_check(
+                "風報比",
+                risk_reward >= self.min_risk_reward,
+                f"{risk_reward:.2f} (最低 {self.min_risk_reward})",
+            )
 
         # ── 資訊顯示（不阻擋，供覆盤參考）──
         effective_max = min(self.max_position_size, self.absolute_max_position)

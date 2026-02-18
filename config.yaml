@@ -5,48 +5,23 @@
 
 # Discord 設定
 discord:
+  # 跟單模式：100% 按照分析師給的點位執行，AI 只負責解析訊號
+  follow_mode: true
+
   monitored_channels:
     - id: "1384381529064476815"
       name: "大鏢客"
       analyst: "大鏢客"
       initial_weight: 1.0
+      leverage: 100
       style: "高槓桿短線，常用 100x，倉位不超過 5%，獲利幾百到兩千多點即出場"
 
     - id: "1237749772148801567"
       name: "三馬哥合約"
       analyst: "三馬哥"
       initial_weight: 1.0
+      leverage: 100
       style: "高槓桿短線，常用 100x，倉位不超過 5%，獲利幾百到兩千多點即出場"
-
-    - id: "1229967087301033994"
-      name: "幣圈所長課堂"
-      analyst: "所長"
-      initial_weight: 1.0
-      style: "偏大方向波段，槓桿不超過 25x，倉位較大可達 20%"
-
-    - id: "1104301561892585543"
-      name: "舒琴"
-      analyst: "舒琴"
-      initial_weight: 1.0
-      style: "偏大方向波段，槓桿不超過 25x，倉位較大可達 20%"
-
-    - id: "1113105418663776316"
-      name: "VIVI 比特幣分析"
-      analyst: "VIVI-BTC"
-      initial_weight: 1.0
-      style: "低槓桿短線，常用 10x，高保證金（大倉位），短線快進快出"
-
-    - id: "1179304542345642024"
-      name: "VIVI 乙太幣"
-      analyst: "VIVI-ETH"
-      initial_weight: 1.0
-      style: "低槓桿短線，常用 10x，高保證金（大倉位），短線快進快出"
-
-    - id: "1113106196510035998"
-      name: "VIVI短線交易"
-      analyst: "VIVI-短線"
-      initial_weight: 1.0
-      style: "低槓桿短線，常用 10x，高保證金（大倉位），短線快進快出"
 
 
 # Claude AI 設定
@@ -99,7 +74,8 @@ trading:
   # 短線高頻參數
   min_confidence: 60           # 降低信心門檻，讓 AI 更積極進場
   min_risk_reward: 1.5         # 短線交易 RR 1.5 即可
-  max_position_size: 5.0       # 每筆最多 5% 倉位（AI 根據信心自行決定 1-5%）
+  max_position_size: 5.0       # 每筆最多 5% 倉位
+  follow_position_size: 5.0    # 跟單模式每次進場倉位（兩個點位則各 2.5%）
   max_positions: 2             # 最多同時持 2 倉（BTC + ETH 各一個方向）
   min_hold_hours: 2            # 翻倉前最低持倉時間（小時），防止頻繁翻倉
   max_daily_trades: 20         # 短線高頻，不限制次數（贏就繼續開）
@@ -114,7 +90,7 @@ risk_limits:
 
 # 市場掃描器設定（主動掃描市場，結合分析師觀點尋找入場機會）
 market_scanner:
-  enabled: true
+  enabled: false                # 跟單模式關閉主動掃描
   interval_seconds: 1800        # 每 30 分鐘掃描一次
   lookback_hours: 4             # 回看最近 4 小時內的分析師訊息
   min_cooldown_seconds: 600    # 任何 AI 分析後至少冷卻 10 分鐘

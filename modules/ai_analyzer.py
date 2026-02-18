@@ -230,6 +230,33 @@ REVIEW_PROMPT_TEMPLATE = """## 交易覆盤請求
 }}"""
 
 
+SIGNAL_PARSER_PROMPT = """你是一個加密貨幣跟單系統的訊號解析器。請從以下分析師訊息中提取「明確的交易指令」。
+
+解析規則：
+1. 只提取分析師「明確給出」的數字點位，不要自己猜測或補充
+2. 止損（SL）和至少一個止盈（TP）都必須存在，缺少其中一個 → SKIP
+3. 如果分析師說「平倉」「出掉」「止損出」「離場」「關倉」「空手」「跑了」等 → CLOSE
+4. 兩個入場點：第一個是主力入場，第二個是加倉/補倉點（通常價格更深）
+5. 幣種識別：BTC/比特幣/大餅/大B → BTCUSDT；ETH/乙太/姨太/以太 → ETHUSDT
+6. 入場策略：有給具體數字但說「市價」「現在進」→ MARKET；有給具體點位 → LIMIT
+7. 純聊天、廣告、技術分析分享（沒有明確進場數字）→ SKIP
+8. 如果平倉指令沒有指定幣種，從上下文判斷；實在判斷不了 → SKIP
+
+分析師訊息：
+{messages}
+
+以 JSON 格式回應（不要包含任何其他文字）：
+{{
+  "action": "LONG" | "SHORT" | "CLOSE" | "SKIP",
+  "symbol": "BTCUSDT" | "ETHUSDT",
+  "entry_1": {{"price": 數字, "strategy": "LIMIT" | "MARKET"}},
+  "entry_2": {{"price": 數字, "strategy": "LIMIT"}} | null,
+  "stop_loss": 數字 | null,
+  "take_profit": [tp1] | [tp1, tp2] | null,
+  "skip_reason": "只在 SKIP 時填寫原因，其他填 null"
+}}"""
+
+
 MORNING_BRIEFING_TEMPLATE = """## 每日早報 — {date}
 
 ### 過去 24 小時分析師觀點
@@ -752,6 +779,16 @@ class AIAnalyzer:
             economic_events=economic_events or "今日無經濟數據公布",
         )
         return self._call_claude(prompt)
+
+    def parse_signal(self, combined_text: str, images: list[dict] | None = None) -> dict:
+        """跟單模式：從分析師訊息中提取交易指令（不做 AI 判斷，只做解析）"""
+        prompt = SIGNAL_PARSER_PROMPT.format(messages=combined_text)
+        result = self._call_claude(prompt, images=images, max_tokens=512)
+        # 若解析失敗則視為 SKIP
+        if "error" in result or result.get("action") not in ("LONG", "SHORT", "CLOSE", "SKIP"):
+            logger.warning("Signal parse failed: %s", result)
+            return {"action": "SKIP", "skip_reason": "解析失敗"}
+        return result
 
     @staticmethod
     def _format_analyst_profiles(profiles: list[dict] | None) -> str:

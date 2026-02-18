@@ -199,8 +199,12 @@ class TradingBot:
 
             analyst_names = [m.analyst for m in messages]
 
-            # 1. 決策引擎處理
-            decision = self.decision.process_signals(messages)
+            # 1. 決策引擎處理（跟單模式 vs AI 自主模式）
+            follow_mode = self.config.get("discord", {}).get("follow_mode", False)
+            if follow_mode:
+                decision = self.decision.process_follow_signals(messages)
+            else:
+                decision = self.decision.process_signals(messages)
 
             if decision is None:
                 logger.info("No actionable signal — skipping")
@@ -214,6 +218,11 @@ class TradingBot:
                 self.db.save_ai_decision(
                     decision, outcome="SKIP", analyst_names=analyst_names,
                 )
+                return
+
+            # 2.5 CLOSE — 跟單模式偵測到平倉指令
+            if action == "CLOSE":
+                await self._handle_follow_close(decision)
                 return
 
             # 3. 檢查是否被風控拒絕
@@ -276,6 +285,10 @@ class TradingBot:
                         await self.telegram.send_entry_confirmation(trade_result)
                         self.risk.record_trade_time()
                         logger.info("Trade #%d executed successfully", trade_result["trade_id"])
+
+                    # 跟單加倉點：執行第二個入場點
+                    if decision.get("_addon_entry"):
+                        await self._handle_addon_entry(decision["_addon_entry"])
                 else:
                     error = trade_result.get("error", "Unknown error")
                     logger.error("Trade execution failed: %s", error)
@@ -294,6 +307,23 @@ class TradingBot:
                         data["symbol"], data["entry_price"])
             await self.telegram.send_entry_confirmation(data)
             self.risk.record_trade_time()
+
+            # 若有同方向其他持倉，顯示平均成本
+            try:
+                symbol = data["symbol"]
+                direction = data["direction"]
+                open_trades = self.db.get_open_trades()
+                same_dir = [t for t in open_trades
+                            if t.symbol == symbol and t.direction == direction]
+                if len(same_dir) >= 2:
+                    avg_cost = round(sum(t.entry_price for t in same_dir) / len(same_dir), 2)
+                    await self.telegram.bot.send_message(
+                        chat_id=self.telegram.chat_id,
+                        text=(f"📊 加倉成交 {symbol} {direction}\n"
+                              f"持倉數: {len(same_dir)} 倉 | 平均成本: {avg_cost}"),
+                    )
+            except Exception:
+                pass
             return
 
         if event_type == "tp1_hit":
@@ -381,6 +411,68 @@ class TradingBot:
         elif event_type == "update":
             # 可選：重要價格變動時通知
             pass
+
+    async def _handle_follow_close(self, decision: dict):
+        """跟單模式：分析師說平倉，自動平掉該幣種所有持倉"""
+        symbol = decision.get("symbol", "")
+        open_trades = self.db.get_open_trades()
+        to_close = [t for t in open_trades if t.symbol == symbol]
+
+        if not to_close:
+            logger.info("Follow CLOSE: no open position for %s", symbol)
+            try:
+                await self.telegram.bot.send_message(
+                    chat_id=self.telegram.chat_id,
+                    text=f"⚠️ 分析師指示平倉 {symbol}，但目前沒有持倉",
+                )
+            except Exception:
+                pass
+            return
+
+        for trade in to_close:
+            result = self.trader.close_trade(trade.id)
+            if result.get("success"):
+                logger.info("Follow CLOSE: closed #%d %s %s", trade.id, trade.direction, symbol)
+                await self.telegram.send_exit_notification(trade, result, review=None)
+                await self.learning.on_trade_closed(trade.id)
+            else:
+                logger.error("Follow CLOSE failed for #%d: %s", trade.id, result.get("error"))
+
+    async def _handle_addon_entry(self, addon: dict):
+        """跟單加倉：執行第二個入場點，並計算兩倉平均成本"""
+        try:
+            addon_result = self.trader.execute_trade(addon)
+            if not addon_result.get("success"):
+                logger.error("Addon entry failed: %s", addon_result.get("error"))
+                return
+
+            symbol = addon["symbol"]
+            action = addon["action"]
+            entry_2_price = addon["entry"]["price"]
+            logger.info("Addon trade #%d placed @ %.2f", addon_result["trade_id"], entry_2_price)
+
+            # 計算兩倉平均成本
+            open_trades = self.db.get_open_trades()
+            same_dir = [t for t in open_trades if t.symbol == symbol and t.direction == action]
+            if len(same_dir) >= 2:
+                prices = [t.entry_price for t in same_dir]
+                avg_cost = round(sum(prices) / len(prices), 2)
+                avg_text = f"\n平均成本: {avg_cost}"
+            else:
+                avg_text = ""
+
+            # 發送加倉通知
+            text = (
+                f"➕ 加倉掛單\n\n"
+                f"#{addon_result['trade_id']} {action} {symbol}\n"
+                f"加倉點: {entry_2_price}{avg_text}\n"
+                f"止損: {addon['stop_loss']} | 止盈: {addon['take_profit']}"
+            )
+            await self.telegram.bot.send_message(
+                chat_id=self.telegram.chat_id, text=text,
+            )
+        except Exception as e:
+            logger.error("Addon entry error: %s", e)
 
     async def _handle_flip_notification(self, flipped: dict):
         """處理翻倉通知：舊倉平倉 + 學習記錄"""
