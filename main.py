@@ -263,6 +263,10 @@ class TradingBot:
                             message=m.content,
                         )
 
+                    # 翻倉通知（先通知舊倉平倉）
+                    if trade_result.get("flipped"):
+                        await self._handle_flip_notification(trade_result["flipped"])
+
                     if trade_result.get("pending"):
                         # LIMIT 掛單：等待成交
                         await self.telegram.send_pending_order(trade_result)
@@ -377,6 +381,39 @@ class TradingBot:
         elif event_type == "update":
             # 可選：重要價格變動時通知
             pass
+
+    async def _handle_flip_notification(self, flipped: dict):
+        """處理翻倉通知：舊倉平倉 + 學習記錄"""
+        old_trade = flipped["old_trade"]
+        close_result = flipped["close_result"]
+
+        logger.info("Flip: closed #%d %s %s (%.2f%%) before opening opposite",
+                     old_trade.id, old_trade.direction, old_trade.symbol,
+                     close_result.get("profit_pct", 0))
+
+        # 發送翻倉平倉通知
+        profit_pct = close_result.get("profit_pct", 0)
+        outcome = close_result.get("outcome", "")
+        icon = "🟢" if outcome == "WIN" else "🔴" if outcome == "LOSS" else "⚪"
+        text = (
+            f"🔄 翻倉！自動平倉舊方向\n\n"
+            f"#{old_trade.id} {old_trade.direction} {old_trade.symbol}\n"
+            f"入場: {old_trade.entry_price} → 平倉: {close_result.get('exit_price', 'N/A')}\n"
+            f"{icon} 結果: {outcome} {profit_pct:+.2f}%\n\n"
+            f"即將開啟反方向新倉..."
+        )
+        try:
+            await self.telegram.bot.send_message(
+                chat_id=self.telegram.chat_id, text=text,
+            )
+        except Exception as e:
+            logger.warning("Failed to send flip notification: %s", e)
+
+        # 記錄學習（延遲覆盤會自動處理）
+        try:
+            await self.learning.on_trade_closed(old_trade.id)
+        except Exception as e:
+            logger.warning("Flip learning record error: %s", e)
 
     # ── 快速回饋學習 ──
 
@@ -610,6 +647,10 @@ class TradingBot:
                             direction=decision["action"],
                             message=m.content,
                         )
+
+                    # 翻倉通知
+                    if trade_result.get("flipped"):
+                        await self._handle_flip_notification(trade_result["flipped"])
 
                     if trade_result.get("pending"):
                         await self.telegram.send_pending_order(trade_result)

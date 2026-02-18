@@ -80,24 +80,39 @@ class RiskManager:
                 else f"{symbol} 不在允許列表",
             )
 
-        # 3. 同方向重複持倉（同幣種同方向擋住，反方向允許）
+        # 3. 持倉衝突檢查（同方向擋住；反方向=翻倉，需滿最低持倉時間）
         pending_trades = self.db.get_pending_trades()
         all_active = open_trades + pending_trades
         same_dir = next(
             (t for t in all_active if t.symbol == symbol and t.direction == direction),
             None,
         )
+        opposite = next(
+            (t for t in all_active if t.symbol == symbol and t.direction != direction),
+            None,
+        )
+
         if same_dir:
             status_label = "掛單" if same_dir.status == "PENDING" else "持倉"
             detail = f"已有 {symbol} {direction} ({status_label})"
+            result.add_check("重複持倉", False, detail)
+        elif opposite:
+            # 反方向 → 翻倉，但需檢查最低持倉時間
+            min_hold = self.config.get("trading", {}).get("min_hold_hours", 2)
+            opp_ts = opposite.timestamp
+            if opp_ts.tzinfo is None:
+                opp_ts = opp_ts.replace(tzinfo=timezone.utc)
+            held_hours = (datetime.now(timezone.utc) - opp_ts).total_seconds() / 3600
+            if held_hours >= min_hold:
+                detail = (f"翻倉: 平掉 {opposite.direction} #{opposite.id} "
+                          f"(已持 {held_hours:.1f}h) → 開 {direction}")
+                result.add_check("翻倉檢查", True, detail)
+            else:
+                detail = (f"翻倉需等待: {opposite.direction} #{opposite.id} "
+                          f"已持 {held_hours:.1f}h (需滿 {min_hold}h)")
+                result.add_check("翻倉檢查", False, detail)
         else:
-            opposite = [t for t in all_active if t.symbol == symbol and t.direction != direction]
-            detail = f"OK (對向持倉: {opposite[0].direction})" if opposite else "OK"
-        result.add_check(
-            "重複持倉",
-            same_dir is None,
-            detail,
-        )
+            result.add_check("重複持倉", True, "OK")
 
         # 4. 風報比（太低的單數學上不划算，阻擋）
         result.add_check(
