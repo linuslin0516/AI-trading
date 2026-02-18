@@ -37,7 +37,6 @@ class RiskManager:
         self.min_risk_reward = trading.get("min_risk_reward", 2.0)
         self.max_position_size = trading.get("max_position_size", 5.0)
         self.max_positions = trading.get("max_positions", 4)
-        self.max_per_symbol = trading.get("max_per_symbol", 2)
         self.max_daily_trades = trading.get("max_daily_trades", 5)
         self.max_daily_loss = trading.get("max_daily_loss", 15.0)
         self.max_consecutive_losses = trading.get("max_consecutive_losses", 3)
@@ -81,19 +80,22 @@ class RiskManager:
                 else f"{symbol} 不在允許列表",
             )
 
-        # 3. 同幣種持倉上限（允許加倉和對沖，但不超過 max_per_symbol）
+        # 3. 同方向重複持倉（同幣種同方向擋住，反方向允許）
         pending_trades = self.db.get_pending_trades()
         all_active = open_trades + pending_trades
-        same_symbol = [t for t in all_active if t.symbol == symbol]
-        same_count = len(same_symbol)
-        if same_count >= self.max_per_symbol:
-            dirs = ", ".join(f"{t.direction}({'掛單' if t.status == 'PENDING' else '持倉'})" for t in same_symbol)
-            detail = f"{symbol} 已有 {same_count} 倉 [{dirs}] (上限 {self.max_per_symbol})"
+        same_dir = next(
+            (t for t in all_active if t.symbol == symbol and t.direction == direction),
+            None,
+        )
+        if same_dir:
+            status_label = "掛單" if same_dir.status == "PENDING" else "持倉"
+            detail = f"已有 {symbol} {direction} ({status_label})"
         else:
-            detail = f"{symbol} {same_count}/{self.max_per_symbol}"
+            opposite = [t for t in all_active if t.symbol == symbol and t.direction != direction]
+            detail = f"OK (對向持倉: {opposite[0].direction})" if opposite else "OK"
         result.add_check(
-            "同幣種持倉",
-            same_count < self.max_per_symbol,
+            "重複持倉",
+            same_dir is None,
             detail,
         )
 

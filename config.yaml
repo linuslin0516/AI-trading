@@ -100,8 +100,7 @@ trading:
   min_confidence: 60           # 降低信心門檻，讓 AI 更積極進場
   min_risk_reward: 1.5         # 短線交易 RR 1.5 即可
   max_position_size: 5.0       # 每筆最多 5% 倉位（AI 根據信心自行決定 1-5%）
-  max_positions: 4             # 最多同時持 4 倉
-  max_per_symbol: 2            # 同幣種最多 2 倉（允許加倉或對沖）
+  max_positions: 4             # 最多同時持 4 倉（BTC 多空 + ETH 多空）
   max_daily_trades: 20         # 短線高頻，不限制次數（贏就繼續開）
   max_daily_loss: 20.0         # 每日最大虧損 20%（帳戶級別，已按倉位加權）
   max_consecutive_losses: 3    # 連輸 3 次當日停止交易
