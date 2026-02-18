@@ -202,101 +202,104 @@ class TradingBot:
             # 1. 決策引擎處理（跟單模式 vs AI 自主模式）
             follow_mode = self.config.get("discord", {}).get("follow_mode", False)
             if follow_mode:
-                decision = self.decision.process_follow_signals(messages)
-            else:
-                decision = self.decision.process_signals(messages)
+                decisions = self.decision.process_follow_signals(messages)
+                if not decisions:
+                    logger.info("No actionable signal — skipping")
+                    return
+                for decision in decisions:
+                    await self._execute_decision(decision, messages, analyst_names)
+                return
 
+            # AI 自主模式：單一決策
+            decision = self.decision.process_signals(messages)
             if decision is None:
                 logger.info("No actionable signal — skipping")
                 return
-
-            action = decision.get("action", "")
-
-            # 2. SKIP — AI 決定不操作
-            if action == "SKIP":
-                logger.info("No actionable signal — skipping")
-                self.db.save_ai_decision(
-                    decision, outcome="SKIP", analyst_names=analyst_names,
-                )
-                return
-
-            # 2.5 CLOSE — 跟單模式偵測到平倉指令
-            if action == "CLOSE":
-                await self._handle_follow_close(decision)
-                return
-
-            # 3. 檢查是否被風控拒絕
-            if decision.get("_rejected"):
-                logger.warning("Signal rejected by risk manager")
-                self.db.save_ai_decision(
-                    decision, outcome="REJECTED", analyst_names=analyst_names,
-                )
-                return
-
-            # 5. 交易設定檢查
-            trading_cfg = self.config.get("trading", {})
-            if not trading_cfg.get("enabled", True):
-                logger.info("Trading disabled — signal only mode")
-                await self.telegram.send_signal(decision, countdown=0)
-                return
-
-            # 6. Telegram 通知 + 30 秒確認
-            countdown = trading_cfg.get("confirmation_delay", 30)
-            result = await self.telegram.send_signal(decision, countdown=countdown)
-
-            if result.get("cancelled"):
-                logger.info("Trade cancelled by user")
-                self.db.save_ai_decision(
-                    decision, outcome="CANCELLED",
-                    analyst_names=analyst_names,
-                    cancel_reason=result.get("cancel_reason", ""),
-                )
-                return
-
-            # 7. 執行交易
-            if trading_cfg.get("auto_execute", True):
-                trade_result = self.trader.execute_trade(decision)
-
-                if trade_result.get("success"):
-                    self.db.save_ai_decision(
-                        decision, outcome="EXECUTED",
-                        analyst_names=analyst_names,
-                        trade_id=trade_result["trade_id"],
-                    )
-
-                    for m in messages:
-                        self.db.record_analyst_call(
-                            trade_id=trade_result["trade_id"],
-                            analyst_name=m.analyst,
-                            direction=decision["action"],
-                            message=m.content,
-                        )
-
-                    # 翻倉通知（先通知舊倉平倉）
-                    if trade_result.get("flipped"):
-                        await self._handle_flip_notification(trade_result["flipped"])
-
-                    if trade_result.get("pending"):
-                        # LIMIT 掛單：等待成交
-                        await self.telegram.send_pending_order(trade_result)
-                        logger.info("Trade #%d LIMIT order pending", trade_result["trade_id"])
-                    else:
-                        # MARKET 單：已成交
-                        await self.telegram.send_entry_confirmation(trade_result)
-                        self.risk.record_trade_time()
-                        logger.info("Trade #%d executed successfully", trade_result["trade_id"])
-
-                    # 跟單加倉點：執行第二個入場點
-                    if decision.get("_addon_entry"):
-                        await self._handle_addon_entry(decision["_addon_entry"])
-                else:
-                    error = trade_result.get("error", "Unknown error")
-                    logger.error("Trade execution failed: %s", error)
-                    await self.telegram.send_error(f"交易執行失敗: {error}")
+            await self._execute_decision(decision, messages, analyst_names)
 
         except Exception as e:
             logger.exception("Error in signal processing pipeline")
             await self.telegram.send_error(f"分析流程錯誤: {e}")
+
+    async def _execute_decision(self, decision: dict, messages: list, analyst_names: list):
+        """執行單一交易決策（SKIP / CLOSE / LONG / SHORT）"""
+        action = decision.get("action", "")
+
+        # SKIP
+        if action == "SKIP":
+            logger.info("No actionable signal — skipping")
+            self.db.save_ai_decision(
+                decision, outcome="SKIP", analyst_names=analyst_names,
+            )
+            return
+
+        # CLOSE — 跟單模式平倉指令
+        if action == "CLOSE":
+            await self._handle_follow_close(decision)
+            return
+
+        # 風控拒絕
+        if decision.get("_rejected"):
+            logger.warning("Signal rejected by risk manager")
+            self.db.save_ai_decision(
+                decision, outcome="REJECTED", analyst_names=analyst_names,
+            )
+            return
+
+        # 交易停用
+        trading_cfg = self.config.get("trading", {})
+        if not trading_cfg.get("enabled", True):
+            logger.info("Trading disabled — signal only mode")
+            await self.telegram.send_signal(decision, countdown=0)
+            return
+
+        # Telegram 通知 + 確認倒數
+        countdown = trading_cfg.get("confirmation_delay", 30)
+        result = await self.telegram.send_signal(decision, countdown=countdown)
+
+        if result.get("cancelled"):
+            logger.info("Trade cancelled by user")
+            self.db.save_ai_decision(
+                decision, outcome="CANCELLED",
+                analyst_names=analyst_names,
+                cancel_reason=result.get("cancel_reason", ""),
+            )
+            return
+
+        # 執行交易
+        if trading_cfg.get("auto_execute", True):
+            trade_result = self.trader.execute_trade(decision)
+
+            if trade_result.get("success"):
+                self.db.save_ai_decision(
+                    decision, outcome="EXECUTED",
+                    analyst_names=analyst_names,
+                    trade_id=trade_result["trade_id"],
+                )
+
+                for m in messages:
+                    self.db.record_analyst_call(
+                        trade_id=trade_result["trade_id"],
+                        analyst_name=m.analyst,
+                        direction=decision["action"],
+                        message=m.content,
+                    )
+
+                if trade_result.get("pending"):
+                    await self.telegram.send_pending_order(trade_result)
+                    logger.info("Trade #%d LIMIT order pending", trade_result["trade_id"])
+                else:
+                    await self.telegram.send_entry_confirmation(trade_result)
+                    self.risk.record_trade_time()
+                    logger.info("Trade #%d executed successfully", trade_result["trade_id"])
+
+                # 跟單加倉點：執行第二個入場點
+                if decision.get("_addon_entry"):
+                    await self._handle_addon_entry(decision["_addon_entry"])
+            else:
+                error = trade_result.get("error", "Unknown error")
+                logger.error("Trade execution failed: %s", error)
+                await self.telegram.send_error(f"交易執行失敗: {error}")
 
     async def _on_position_event(self, event_type: str, trade, data: dict):
         """持倉監控回調"""
@@ -473,39 +476,6 @@ class TradingBot:
             )
         except Exception as e:
             logger.error("Addon entry error: %s", e)
-
-    async def _handle_flip_notification(self, flipped: dict):
-        """處理翻倉通知：舊倉平倉 + 學習記錄"""
-        old_trade = flipped["old_trade"]
-        close_result = flipped["close_result"]
-
-        logger.info("Flip: closed #%d %s %s (%.2f%%) before opening opposite",
-                     old_trade.id, old_trade.direction, old_trade.symbol,
-                     close_result.get("profit_pct", 0))
-
-        # 發送翻倉平倉通知
-        profit_pct = close_result.get("profit_pct", 0)
-        outcome = close_result.get("outcome", "")
-        icon = "🟢" if outcome == "WIN" else "🔴" if outcome == "LOSS" else "⚪"
-        text = (
-            f"🔄 翻倉！自動平倉舊方向\n\n"
-            f"#{old_trade.id} {old_trade.direction} {old_trade.symbol}\n"
-            f"入場: {old_trade.entry_price} → 平倉: {close_result.get('exit_price', 'N/A')}\n"
-            f"{icon} 結果: {outcome} {profit_pct:+.2f}%\n\n"
-            f"即將開啟反方向新倉..."
-        )
-        try:
-            await self.telegram.bot.send_message(
-                chat_id=self.telegram.chat_id, text=text,
-            )
-        except Exception as e:
-            logger.warning("Failed to send flip notification: %s", e)
-
-        # 記錄學習（延遲覆盤會自動處理）
-        try:
-            await self.learning.on_trade_closed(old_trade.id)
-        except Exception as e:
-            logger.warning("Flip learning record error: %s", e)
 
     # ── 快速回饋學習 ──
 

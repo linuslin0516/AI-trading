@@ -226,10 +226,11 @@ class DecisionEngine:
         logger.warning("Unknown action: %s", action)
         return None
 
-    def process_follow_signals(self, messages: list) -> dict | None:
+    def process_follow_signals(self, messages: list) -> list[dict] | None:
         """
         跟單模式：AI 只解析分析師訊息，提取入場/止損/止盈點位，100% 按照執行
-        支援：單入場點、雙入場點（加倉）、平倉指令
+        支援：單入場點、雙入場點（加倉）、平倉指令、多位分析師同時發訊號
+        回傳 list[dict]，每個元素代表一個獨立訊號（不同幣種或不同方向）
         """
         logger.info("Follow mode: parsing %d messages", len(messages))
 
@@ -242,109 +243,124 @@ class DecisionEngine:
             analyst_names.append(m.analyst)
             all_images.extend(getattr(m, "images", []))
         combined_text = "\n".join(lines)
+        analyst_tag = ", ".join(set(analyst_names))
 
-        # 2. AI 解析訊號
-        parsed = self.ai.parse_signal(combined_text, images=all_images[:4] or None)
-        action = parsed.get("action", "SKIP")
-        symbol = parsed.get("symbol", "")
+        # 2. AI 解析訊號（可能回傳多個）
+        parsed_list = self.ai.parse_signal(combined_text, images=all_images[:4] or None)
+        logger.info("Follow mode: AI returned %d signal(s)", len(parsed_list))
 
-        if action == "SKIP":
-            logger.info("Follow mode SKIP: %s", parsed.get("skip_reason", ""))
-            return parsed
+        results = []
+        follow_pos = self.config.get("trading", {}).get("follow_position_size", 5.0)
+        leverage = self._get_follow_leverage(analyst_names)
 
-        if action == "CLOSE":
-            logger.info("Follow mode CLOSE detected for %s", symbol)
-            return {
-                "action": "CLOSE",
+        for parsed in parsed_list:
+            action = parsed.get("action", "SKIP")
+            symbol = parsed.get("symbol", "")
+
+            # SKIP
+            if action == "SKIP":
+                logger.info("Follow mode SKIP [%s]: %s", symbol, parsed.get("skip_reason", ""))
+                results.append(parsed)
+                continue
+
+            # CLOSE
+            if action == "CLOSE":
+                logger.info("Follow mode CLOSE detected for %s", symbol)
+                results.append({
+                    "action": "CLOSE",
+                    "symbol": symbol,
+                    "_analyst_messages": [
+                        {"analyst": m.analyst, "content": m.content} for m in messages
+                    ],
+                })
+                continue
+
+            if action not in ("LONG", "SHORT"):
+                continue
+
+            entry_1 = parsed.get("entry_1")
+            entry_2 = parsed.get("entry_2")
+            stop_loss = parsed.get("stop_loss")
+            take_profit = parsed.get("take_profit") or []
+
+            if not entry_1 or entry_1.get("price") is None or stop_loss is None:
+                logger.warning("Follow mode: missing entry_1 or stop_loss for %s, skipping", symbol)
+                results.append({"action": "SKIP", "skip_reason": f"{symbol} 缺少入場價或止損"})
+                continue
+
+            if not take_profit:
+                logger.warning("Follow mode: missing take_profit for %s, skipping", symbol)
+                results.append({"action": "SKIP", "skip_reason": f"{symbol} 缺少止盈目標"})
+                continue
+
+            # 倉位大小：有兩個點位則各佔一半
+            pos_size_1 = round(follow_pos / 2, 1) if entry_2 else follow_pos
+
+            # 建立決策
+            rr = self._calc_rr(action, entry_1["price"], stop_loss, take_profit)
+            decision = {
+                "action": action,
                 "symbol": symbol,
+                "confidence": 90,
+                "leverage": leverage,
+                "entry": entry_1,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "position_size": pos_size_1,
+                "risk_reward": rr,
+                "reasoning": {
+                    "analyst_consensus": f"跟單: {analyst_tag}",
+                    "technical": "100% 按照分析師指定點位",
+                    "sentiment": "N/A",
+                    "historical": "N/A",
+                },
+                "_follow_mode": True,
                 "_analyst_messages": [
                     {"analyst": m.analyst, "content": m.content} for m in messages
                 ],
             }
 
-        if action not in ("LONG", "SHORT"):
-            return None
+            # 風控（跟單模式：跳過 confidence/RR，只檢查允許幣種）
+            risk_result = self.risk.check(decision, follow_mode=True)
+            if not risk_result.passed:
+                logger.warning("Follow mode risk check failed for %s:\n%s",
+                               symbol, risk_result.summary())
+                results.append({
+                    **decision,
+                    "_rejected": True,
+                    "_risk_summary": risk_result.summary(),
+                    "_risk_checks": risk_result.checks,
+                })
+                continue
 
-        entry_1 = parsed.get("entry_1")
-        entry_2 = parsed.get("entry_2")
-        stop_loss = parsed.get("stop_loss")
-        take_profit = parsed.get("take_profit") or []
+            decision["_rejected"] = False
+            decision["_risk_summary"] = risk_result.summary()
+            decision["_risk_checks"] = risk_result.checks
 
-        if not entry_1 or entry_1.get("price") is None or stop_loss is None:
-            logger.warning("Follow mode: missing entry_1 or stop_loss, skipping")
-            return {"action": "SKIP", "skip_reason": "缺少入場價或止損"}
+            # 若有第二個入場點，附加為加倉決策
+            if entry_2 and entry_2.get("price") is not None:
+                decision["_addon_entry"] = {
+                    "action": action,
+                    "symbol": symbol,
+                    "entry": entry_2,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "leverage": leverage,
+                    "position_size": round(follow_pos / 2, 1),
+                    "_follow_mode": True,
+                    "_is_addon": True,
+                    "confidence": 90,
+                    "risk_reward": rr,
+                    "reasoning": decision["reasoning"],
+                }
+                logger.info("Follow mode: dual entry for %s (%.2f + %.2f)",
+                            symbol, entry_1["price"], entry_2["price"])
 
-        if not take_profit:
-            logger.warning("Follow mode: missing take_profit, skipping")
-            return {"action": "SKIP", "skip_reason": "缺少止盈目標"}
+            logger.info("Follow mode decision: %s %s @ %.2f (SL=%.2f TP=%s lev=%dx pos=%.1f%%)",
+                        action, symbol, entry_1["price"], stop_loss, take_profit, leverage, pos_size_1)
+            results.append(decision)
 
-        # 3. 槓桿：從 config 取分析師設定的槓桿
-        leverage = self._get_follow_leverage(analyst_names)
-
-        # 4. 倉位大小：有兩個點位則各佔一半
-        follow_pos = self.config.get("trading", {}).get("follow_position_size", 5.0)
-        pos_size_1 = round(follow_pos / 2, 1) if entry_2 else follow_pos
-
-        # 5. 建立主決策
-        rr = self._calc_rr(action, entry_1["price"], stop_loss, take_profit)
-        decision = {
-            "action": action,
-            "symbol": symbol,
-            "confidence": 90,
-            "leverage": leverage,
-            "entry": entry_1,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "position_size": pos_size_1,
-            "risk_reward": rr,
-            "reasoning": {
-                "analyst_consensus": f"跟單: {', '.join(set(analyst_names))}",
-                "technical": "100% 按照分析師指定點位",
-                "sentiment": "N/A",
-                "historical": "N/A",
-            },
-            "_follow_mode": True,
-            "_analyst_messages": [
-                {"analyst": m.analyst, "content": m.content} for m in messages
-            ],
-        }
-
-        # 6. 風控（跟單模式：只檢查重複持倉）
-        risk_result = self.risk.check(decision, follow_mode=True)
-        if not risk_result.passed:
-            logger.warning("Follow mode risk check failed:\n%s", risk_result.summary())
-            return {
-                **decision,
-                "_rejected": True,
-                "_risk_summary": risk_result.summary(),
-                "_risk_checks": risk_result.checks,
-            }
-        decision["_rejected"] = False
-        decision["_risk_summary"] = risk_result.summary()
-        decision["_risk_checks"] = risk_result.checks
-
-        # 7. 若有第二個入場點，附加為加倉決策
-        if entry_2 and entry_2.get("price") is not None:
-            decision["_addon_entry"] = {
-                "action": action,
-                "symbol": symbol,
-                "entry": entry_2,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "leverage": leverage,
-                "position_size": round(follow_pos / 2, 1),
-                "_follow_mode": True,
-                "_is_addon": True,
-                "confidence": 90,
-                "risk_reward": rr,
-                "reasoning": decision["reasoning"],
-            }
-            logger.info("Follow mode: dual entry detected (%.2f + %.2f)",
-                        entry_1["price"], entry_2["price"])
-
-        logger.info("Follow mode decision: %s %s @ %.2f (SL=%.2f TP=%s lev=%dx pos=%.1f%%)",
-                    action, symbol, entry_1["price"], stop_loss, take_profit, leverage, pos_size_1)
-        return decision
+        return results if results else None
 
     def _get_follow_leverage(self, analyst_names: list) -> int:
         """從 config 取分析師指定的槓桿倍數"""

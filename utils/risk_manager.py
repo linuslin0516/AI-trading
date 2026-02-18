@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from modules.database import Database
 
@@ -81,7 +81,7 @@ class RiskManager:
                 else f"{symbol} 不在允許列表",
             )
 
-        # 3. 持倉衝突檢查（同方向擋住；反方向=翻倉，需滿最低持倉時間）
+        # 3. 持倉衝突檢查（AI模式：同方向擋住；跟單模式：允許加倉；反方向：多空並存）
         pending_trades = self.db.get_pending_trades()
         all_active = open_trades + pending_trades
         same_dir = next(
@@ -93,25 +93,21 @@ class RiskManager:
             None,
         )
 
-        if same_dir:
+        if same_dir and not follow_mode:
+            # AI 模式：擋住重複持倉
             status_label = "掛單" if same_dir.status == "PENDING" else "持倉"
             detail = f"已有 {symbol} {direction} ({status_label})"
             result.add_check("重複持倉", False, detail)
+        elif same_dir and follow_mode:
+            # 跟單模式：信任分析師加倉指令，允許
+            status_label = "掛單" if same_dir.status == "PENDING" else "持倉"
+            detail = f"跟單加倉: 已有 {symbol} {direction} ({status_label})，允許"
+            result.add_check("跟單加倉", True, detail)
         elif opposite:
-            # 反方向 → 翻倉，但需檢查最低持倉時間
-            min_hold = self.config.get("trading", {}).get("min_hold_hours", 2)
-            opp_ts = opposite.timestamp
-            if opp_ts.tzinfo is None:
-                opp_ts = opp_ts.replace(tzinfo=timezone.utc)
-            held_hours = (datetime.now(timezone.utc) - opp_ts).total_seconds() / 3600
-            if held_hours >= min_hold:
-                detail = (f"翻倉: 平掉 {opposite.direction} #{opposite.id} "
-                          f"(已持 {held_hours:.1f}h) → 開 {direction}")
-                result.add_check("翻倉檢查", True, detail)
-            else:
-                detail = (f"翻倉需等待: {opposite.direction} #{opposite.id} "
-                          f"已持 {held_hours:.1f}h (需滿 {min_hold}h)")
-                result.add_check("翻倉檢查", False, detail)
+            # 反方向 → 多空並存，直接允許
+            detail = (f"多空並存: {opposite.direction} #{opposite.id} 繼續持有，"
+                      f"同時開 {direction}")
+            result.add_check("多空並存", True, detail)
         else:
             result.add_check("重複持倉", True, "OK")
 

@@ -48,11 +48,9 @@ K 線分析原則（極重要！）：
 持倉規則（重要！）：
 - BTC 和 ETH 各自獨立判斷，互不影響。分析師對 BTC 看多不代表要跳過 ETH 的多頭信號
 - 同幣種同方向只能持有 1 單，不可加倉
-- 同幣種只能持有一個方向。如果你開反方向單，系統會自動「翻倉」（先平掉舊倉，再開新倉）
-- 翻倉條件：舊倉必須已持有超過 2 小時，否則系統會擋住（防止頻繁翻倉）
-- 翻倉 = 你認為之前的方向錯了，想改方向。這是一個重大決策，必須有充分的技術依據
-- 不要輕易翻倉：如果只是短線回調，不需要翻倉，讓止損系統處理就好
-- 翻倉的覆盤會特別嚴格：4 小時後 AI 會檢視翻倉是否正確，從中學習何時該翻、何時不該翻
+- 同幣種可以同時持有多空方向（多空並存），各自由系統獨立管理止盈止損
+- 例如：BTC LONG 與 BTC SHORT 可以同時存在，代表兩個獨立的交易觀點
+- 分析師的新方向信號不會自動平掉舊方向，兩邊各自依照止盈止損出場
 
 核心原則：
 1. 你是「精準型」交易者，每筆交易都要有明確的技術依據和精確的進場點位，不要勉強進場
@@ -71,7 +69,7 @@ K 線分析原則（極重要！）：
 14. 嚴格遵守市場狀態策略指引：趨勢行情用順勢策略（寬止盈），盤整行情用均值回歸策略（窄止盈），不同狀態下止盈止損設定差異很大
 15. 多時間框架對齊：market data 中的 mtf_alignment 欄位顯示 4h→1h→15m 方向一致性。alignment_score >60 或 <-60 是強信號，方向分歧時降低倉位
 16. 單筆風險控管（最重要）：每筆交易虧損不得超過帳戶 1-2%。止損位置由技術面決定，倉位大小由止損距離反推。寧可倉位小也不要亂設止損。如果技術上合理的止損距離太遠導致倉位太小，寧可不做（SKIP）也不要硬進
-17. 開了就不動，除非翻倉：一旦進場，止盈止損由系統自動執行，你不能調整也不能主動平倉。唯一的例外是「翻倉」——如果你確信方向錯了，可以開反方向單，系統會自動平掉舊倉再開新倉（舊倉需持有 2 小時以上）
+17. 開了就不動：一旦進場，止盈止損由系統自動執行，你不能調整也不能主動平倉。同幣種可以同時持有多空方向（多空並存），各自獨立由系統管理
 
 你的回應必須是有效的 JSON，不要包含任何 markdown 標記或其他文字。"""
 
@@ -241,19 +239,24 @@ SIGNAL_PARSER_PROMPT = """你是一個加密貨幣跟單系統的訊號解析器
 6. 入場策略：有給具體數字但說「市價」「現在進」→ MARKET；有給具體點位 → LIMIT
 7. 純聊天、廣告、技術分析分享（沒有明確進場數字）→ SKIP
 8. 如果平倉指令沒有指定幣種，從上下文判斷；實在判斷不了 → SKIP
+9. 多位分析師同時發訊號時：不同幣種各自獨立列出；同幣種同方向合併為一個（取第一位的點位）；同幣種不同方向各自列出
 
 分析師訊息：
 {messages}
 
 以 JSON 格式回應（不要包含任何其他文字）：
 {{
-  "action": "LONG" | "SHORT" | "CLOSE" | "SKIP",
-  "symbol": "BTCUSDT" | "ETHUSDT",
-  "entry_1": {{"price": 數字, "strategy": "LIMIT" | "MARKET"}},
-  "entry_2": {{"price": 數字, "strategy": "LIMIT"}} | null,
-  "stop_loss": 數字 | null,
-  "take_profit": [tp1] | [tp1, tp2] | null,
-  "skip_reason": "只在 SKIP 時填寫原因，其他填 null"
+  "signals": [
+    {{
+      "action": "LONG" | "SHORT" | "CLOSE" | "SKIP",
+      "symbol": "BTCUSDT" | "ETHUSDT",
+      "entry_1": {{"price": 數字, "strategy": "LIMIT" | "MARKET"}},
+      "entry_2": {{"price": 數字, "strategy": "LIMIT"}} | null,
+      "stop_loss": 數字 | null,
+      "take_profit": [tp1] | [tp1, tp2] | null,
+      "skip_reason": "只在 SKIP 時填寫原因，其他填 null"
+    }}
+  ]
 }}"""
 
 
@@ -780,15 +783,29 @@ class AIAnalyzer:
         )
         return self._call_claude(prompt)
 
-    def parse_signal(self, combined_text: str, images: list[dict] | None = None) -> dict:
-        """跟單模式：從分析師訊息中提取交易指令（不做 AI 判斷，只做解析）"""
+    def parse_signal(self, combined_text: str, images: list[dict] | None = None) -> list[dict]:
+        """跟單模式：從分析師訊息中提取交易指令（可能回傳多個訊號）"""
         prompt = SIGNAL_PARSER_PROMPT.format(messages=combined_text)
-        result = self._call_claude(prompt, images=images, max_tokens=512)
-        # 若解析失敗則視為 SKIP
-        if "error" in result or result.get("action") not in ("LONG", "SHORT", "CLOSE", "SKIP"):
+        result = self._call_claude(prompt, images=images, max_tokens=800)
+
+        if "error" in result:
             logger.warning("Signal parse failed: %s", result)
-            return {"action": "SKIP", "skip_reason": "解析失敗"}
-        return result
+            return [{"action": "SKIP", "skip_reason": "解析失敗"}]
+
+        signals = result.get("signals", [])
+        if not signals:
+            # 相容舊格式（單一 action 物件）
+            if result.get("action") in ("LONG", "SHORT", "CLOSE", "SKIP"):
+                return [result]
+            logger.warning("Signal parse returned no signals: %s", result)
+            return [{"action": "SKIP", "skip_reason": "解析失敗"}]
+
+        valid = []
+        for s in signals:
+            if s.get("action") not in ("LONG", "SHORT", "CLOSE", "SKIP"):
+                s = {"action": "SKIP", "skip_reason": "無效 action"}
+            valid.append(s)
+        return valid or [{"action": "SKIP", "skip_reason": "無訊號"}]
 
     @staticmethod
     def _format_analyst_profiles(profiles: list[dict] | None) -> str:

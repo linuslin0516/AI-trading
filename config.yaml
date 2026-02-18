@@ -76,8 +76,7 @@ trading:
   min_risk_reward: 1.5         # 短線交易 RR 1.5 即可
   max_position_size: 5.0       # 每筆最多 5% 倉位
   follow_position_size: 5.0    # 跟單模式每次進場倉位（兩個點位則各 2.5%）
-  max_positions: 2             # 最多同時持 2 倉（BTC + ETH 各一個方向）
-  min_hold_hours: 2            # 翻倉前最低持倉時間（小時），防止頻繁翻倉
+  max_positions: 4             # 最多同時持 4 倉（BTC/ETH 各可多空並存）
   max_daily_trades: 20         # 短線高頻，不限制次數（贏就繼續開）
   max_daily_loss: 20.0         # 每日最大虧損 20%（帳戶級別，已按倉位加權）
   max_consecutive_losses: 3    # 連輸 3 次當日停止交易
@@ -110,7 +109,7 @@ message_scoring:
 
 # AI 學習設定
 learning:
-  enabled: true
+  enabled: false  # 跟單模式：不需要 AI 覆盤，節省 API 用量
   min_trades_before_learning: 10
   analyst_weight_update_frequency: 1
   parameter_optimization_frequency: 50
@@ -135,7 +134,7 @@ notifications:
 
 # 數據庫設定
 database:
-  path: "./data/trades.db"
+  path: "./data/trades_follow.db"
   backup_frequency: 86400
 
 # 日誌設定

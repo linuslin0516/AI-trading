@@ -309,30 +309,6 @@ class PaperTrader:
         leverage = max(1, leverage)  # 至少 1x
 
         try:
-            # 0. 翻倉檢查：同幣種反方向持倉 → 先平掉舊倉
-            flipped_trade = None
-            open_trades = self.db.get_open_trades()
-            opposite = next(
-                (t for t in open_trades if t.symbol == symbol and t.direction != action),
-                None,
-            )
-            if opposite:
-                logger.info("Flip detected: closing #%d %s %s before opening %s",
-                            opposite.id, opposite.direction, symbol, action)
-                flip_result = self.close_trade(opposite.id)
-                if flip_result.get("success"):
-                    flipped_trade = {"old_trade": opposite, "close_result": flip_result}
-                else:
-                    logger.warning("Failed to close opposite position #%d: %s",
-                                   opposite.id, flip_result.get("error"))
-
-            # 同幣種 PENDING 掛單也一併取消
-            for tid in list(self._pending_orders):
-                order = self._pending_orders[tid]
-                if order["symbol"] == symbol and order["direction"] != action:
-                    logger.info("Cancelling opposite pending order #%d %s", tid, order["direction"])
-                    self.cancel_pending_order(tid)
-
             # 1. 判斷訂單類型
             strategy = decision["entry"].get("strategy", "LIMIT")
             is_limit = strategy != "MARKET"
@@ -396,7 +372,7 @@ class PaperTrader:
                     trade.id, action, symbol, entry_price, quantity,
                 )
 
-            result = {
+            return {
                 "success": True,
                 "trade_id": trade.id,
                 "order_id": f"PAPER-{trade.id}",
@@ -408,9 +384,6 @@ class PaperTrader:
                 "take_profit": take_profit,
                 "pending": is_limit,
             }
-            if flipped_trade:
-                result["flipped"] = flipped_trade
-            return result
 
         except Exception as e:
             logger.error("Paper trade execution error: %s", e)
