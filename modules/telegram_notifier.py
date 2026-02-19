@@ -62,6 +62,7 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("stop", self._cmd_stop))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
         self._app.add_handler(CommandHandler("test_trade", self._cmd_test_trade))
+        self._app.add_handler(CommandHandler("test_signal", self._cmd_test_signal))
         self._app.add_handler(CommandHandler("positions", self._cmd_positions))
         self._app.add_handler(CommandHandler("pnl", self._cmd_pnl))
         self._app.add_handler(CommandHandler("close", self._cmd_close))
@@ -749,6 +750,79 @@ class TelegramNotifier:
         except Exception as e:
             logger.exception("Test trade error")
             await update.message.reply_text(f"❌ 測試交易錯誤: {e}")
+
+    async def _cmd_test_signal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """測試完整流程：send_signal 倒數 → execute_trade → 進場確認"""
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._trader:
+            await update.message.reply_text("❌ 交易模組未初始化")
+            return
+
+        await update.message.reply_text("🧪 開始完整流程測試（10 秒倒數）...")
+
+        try:
+            r = requests.get(
+                f"{FUTURES_URL}/fapi/v1/ticker/price",
+                params={"symbol": "BTCUSDT"}, timeout=10,
+            )
+            price = float(r.json()["price"])
+
+            decision = {
+                "action": "LONG",
+                "symbol": "BTCUSDT",
+                "confidence": 85,
+                "entry": {"price": price, "strategy": "MARKET"},
+                "stop_loss": round(price * 0.98, 2),
+                "take_profit": [round(price * 1.02, 2), round(price * 1.04, 2)],
+                "leverage": 100,
+                "risk_reward": 2.0,
+                "position_size": 1.0,
+                "reasoning": {
+                    "analyst_consensus": "【測試訊號】完整流程驗證",
+                    "technical": "N/A",
+                    "sentiment": "N/A",
+                },
+                "risk_assessment": {
+                    "max_loss_pct": 2.0,
+                    "expected_profit_pct": [2.0, 4.0],
+                    "fee_cost_pct": 0.1,
+                    "win_probability": 0.5,
+                },
+                "_analyst_messages": [],
+            }
+
+            # 走完整 send_signal 流程（倒數 10 秒，可取消）
+            result = await self.send_signal(decision, countdown=10)
+
+            if result.get("cancelled"):
+                await update.message.reply_text("❌ 測試訊號已取消")
+                return
+
+            # 執行交易
+            trade_result = self._trader.execute_trade(decision)
+            if trade_result.get("success"):
+                if self._db:
+                    self._db.save_ai_decision(
+                        decision, outcome="EXECUTED",
+                        analyst_names=["TEST"],
+                        trade_id=trade_result["trade_id"],
+                    )
+                await self.send_entry_confirmation(trade_result)
+                await update.message.reply_text(
+                    f"✅ 完整流程測試通過！\n"
+                    f"交易 #{trade_result['trade_id']} 已建立\n"
+                    f"使用 /positions 查看持倉"
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ 執行失敗: {trade_result.get('error', 'Unknown')}"
+                )
+
+        except Exception as e:
+            logger.exception("Test signal error")
+            await update.message.reply_text(f"❌ 測試流程錯誤: {e}")
 
     def _build_positions_text(self) -> str:
         """產生持倉資訊文字（供 /positions 和刷新按鈕共用）"""
