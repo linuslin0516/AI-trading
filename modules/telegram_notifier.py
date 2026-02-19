@@ -28,7 +28,17 @@ class TelegramNotifier:
         self.chat_id = tg_cfg.get("chat_id", "")
         self.notify_cfg = config.get("notifications", {})
 
-        self.bot = Bot(token=self.bot_token)
+        # 獨立的 sender bot（有明確的 HTTP timeout，不受 polling 連線影響）
+        self.bot = Bot(
+            token=self.bot_token,
+            request=HTTPXRequest(
+                connection_pool_size=8,
+                connect_timeout=10.0,
+                read_timeout=15.0,
+                write_timeout=10.0,
+                pool_timeout=5.0,
+            ),
+        )
         self._app: Application | None = None
         self._pending_decisions: dict[str, dict] = {}  # msg_id -> decision
         self._cancel_callbacks: dict[str, asyncio.Event] = {}
@@ -69,8 +79,8 @@ class TelegramNotifier:
         await self._app.start()
         await self._app.updater.start_polling(drop_pending_updates=True)
 
-        # 用 Application 的 bot（有 20 連線池）取代預設的 bot（只有 1 連線）
-        self.bot = self._app.bot
+        # self.bot 保持獨立（有明確 timeout），不替換為 Application 的 bot
+        # Application 的 bot 只用於 polling / callback 內部
 
         logger.info("Telegram bot started with persistent polling")
 
