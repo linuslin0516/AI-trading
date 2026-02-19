@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import json
 import logging
 from datetime import datetime, timezone
@@ -174,25 +175,39 @@ class TelegramNotifier:
         ])
 
         logger.info("Sending trade signal to Telegram (chat_id=%s)...", self.chat_id)
+
+        # 使用 requests（同步 + OS-level timeout）跑在 executor，
+        # 避免 asyncio.wait_for 在 Python 3.11 + httpx 無法可靠取消的問題
+        keyboard_dict = {
+            "inline_keyboard": [[
+                {"text": "❌ 取消", "callback_data": "cancel"},
+                {"text": "⚡ 立即執行", "callback_data": "execute_now"},
+            ]]
+        }
+        _send_fn = functools.partial(
+            requests.post,
+            f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
+            json={"chat_id": self.chat_id, "text": text, "reply_markup": keyboard_dict},
+            timeout=15,
+        )
+        loop = asyncio.get_event_loop()
         try:
-            msg = await asyncio.wait_for(
-                self.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=text,
-                    reply_markup=keyboard,
-                ),
-                timeout=30,
+            resp = await asyncio.wait_for(
+                loop.run_in_executor(None, _send_fn),
+                timeout=20,
             )
+            resp.raise_for_status()
+            msg_message_id = resp.json()["result"]["message_id"]
         except asyncio.TimeoutError:
-            logger.error("Telegram send_message timed out after 30s")
+            logger.error("Telegram send_message timed out (20s executor)")
             return {"executed": True, "cancelled": False}
         except Exception as e:
             logger.error("Telegram send_message failed: %s", e)
             return {"executed": True, "cancelled": False}
 
-        logger.info("Signal sent to Telegram (msg_id=%s)", msg.message_id)
+        logger.info("Signal sent to Telegram (msg_id=%s)", msg_message_id)
 
-        msg_id = str(msg.message_id)
+        msg_id = str(msg_message_id)
         self._pending_decisions[msg_id] = decision
         cancel_event = asyncio.Event()
         self._cancel_callbacks[msg_id] = cancel_event
@@ -222,25 +237,37 @@ class TelegramNotifier:
         self._cancel_callbacks.pop(msg_id, None)
 
         if cancelled:
-            await self.bot.edit_message_text(
-                chat_id=self.chat_id,
-                message_id=msg.message_id,
-                text=text.replace(
-                    f"⏱️ {countdown} 秒後自動執行...",
-                    f"❌ 已取消\n原因：{cancel_reason}"
-                ),
-            )
+            try:
+                await asyncio.wait_for(
+                    self.bot.edit_message_text(
+                        chat_id=self.chat_id,
+                        message_id=msg_message_id,
+                        text=text.replace(
+                            f"⏱️ {countdown} 秒後自動執行...",
+                            f"❌ 已取消\n原因：{cancel_reason}"
+                        ),
+                    ),
+                    timeout=10,
+                )
+            except Exception:
+                pass
             return {"executed": False, "cancelled": True, "cancel_reason": cancel_reason}
 
         status_text = "⚡ 立即執行中..." if execute_now else "✅ 倒數結束，執行中..."
-        await self.bot.edit_message_text(
-            chat_id=self.chat_id,
-            message_id=msg.message_id,
-            text=text.replace(
-                f"⏱️ {countdown} 秒後自動執行...",
-                status_text,
-            ),
-        )
+        try:
+            await asyncio.wait_for(
+                self.bot.edit_message_text(
+                    chat_id=self.chat_id,
+                    message_id=msg_message_id,
+                    text=text.replace(
+                        f"⏱️ {countdown} 秒後自動執行...",
+                        status_text,
+                    ),
+                ),
+                timeout=10,
+            )
+        except Exception:
+            pass
 
         return {"executed": True, "cancelled": False}
 
