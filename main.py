@@ -330,33 +330,42 @@ class TradingBot:
             return
 
         if event_type == "tp1_hit":
-            # TP1 部分止盈通知
-            tp1_price = data.get("tp1_price", 0)
+            # 部分止盈通知（TP1 / TP2 通用）
+            tp_index = data.get("tp_index", 0)   # 0=TP1, 1=TP2
+            tp_label = f"TP{tp_index + 1}"
+            tp_price = data.get("tp1_price", 0)
             closed_qty = data.get("closed_qty", 0)
             remaining = data.get("remaining_qty", 0)
             current = data.get("current_price", 0)
-            breakeven_sl = data.get("breakeven_sl", 0)
+            breakeven_sl = data.get("breakeven_sl")
             old_sl = data.get("old_sl", 0)
 
-            logger.info("TP1 hit for trade #%d %s, SL moved to breakeven", trade.id, trade.symbol)
+            logger.info("%s hit for trade #%d %s", tp_label, trade.id, trade.symbol)
+
+            # TP1：止損移到保本
+            if tp_index == 0 and breakeven_sl:
+                sl_line = f"\n\n🛡️ 保本機制啟動\n止損移至: {old_sl} → {breakeven_sl}"
+                next_hint = "\n繼續持有，等待下一個目標..."
+            else:
+                sl_line = ""
+                next_hint = "\n繼續持有，等待下一個目標..."
 
             text = (
-                f"🎯 TP1 止盈到達！\n\n"
+                f"🎯 {tp_label} 止盈到達！\n\n"
                 f"#{trade.id} {trade.direction} {trade.symbol}\n"
-                f"目標 1 價格: {tp1_price}\n"
+                f"目標價格: {tp_price}\n"
                 f"當前價格: {current}\n"
                 f"已平倉數量: {closed_qty}\n"
-                f"剩餘倉位: {remaining}\n\n"
-                f"🛡️ 已啟動保本機制\n"
-                f"止損已移至成本價: {old_sl} → {breakeven_sl}\n"
-                f"繼續持有，等待目標 2..."
+                f"剩餘倉位: {remaining}"
+                f"{sl_line}"
+                f"{next_hint}"
             )
             try:
                 await self.telegram.bot.send_message(
                     chat_id=self.telegram.chat_id, text=text,
                 )
             except Exception as e:
-                logger.warning("Failed to send TP1 notification: %s", e)
+                logger.warning("Failed to send %s notification: %s", tp_label, e)
             return
 
         if event_type in ("stop_loss", "take_profit", "liquidation", "closed_unknown"):

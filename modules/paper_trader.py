@@ -127,7 +127,7 @@ class PaperTrader:
                 "initial_qty": qty * 2 if tp1_hit else qty,
                 "direction": trade.direction,
                 "trade_id": trade.id,
-                "tp1_hit": tp1_hit,
+                "tp_idx": 1 if tp1_hit else 0,
             }
             logger.info(
                 "Restored paper position: #%d %s %s qty=%.6f (tp1_hit=%s)",
@@ -365,7 +365,7 @@ class PaperTrader:
                     "initial_qty": quantity,
                     "direction": action,
                     "trade_id": trade.id,
-                    "tp1_hit": False,
+                    "tp_idx": 0,
                 }
                 logger.info(
                     "Paper MARKET trade executed: #%d %s %s @ %s qty=%s (virtual)",
@@ -523,7 +523,7 @@ class PaperTrader:
             "initial_qty": order["quantity"],
             "direction": order["direction"],
             "trade_id": trade_id,
-            "tp1_hit": False,
+            "tp_idx": 0,
         }
 
         logger.info(
@@ -710,121 +710,102 @@ class PaperTrader:
                             else trade.take_profit
                         ) or []
 
-                        # ── Case A: TP1 檢查（價格觸及第一目標） ──
-                        if (not pos["tp1_hit"]
-                                and len(tp_list) >= 2
-                                and actual_qty > 0):
+                        # ── 多段 TP 檢查（支援 1~3 個止盈目標） ──
+                        tp_idx = pos.get("tp_idx", 0)
+                        n_tps = len(tp_list)
 
-                            tp1_hit = (
-                                (trade.direction == "LONG" and current_price >= tp_list[0]) or
-                                (trade.direction == "SHORT" and current_price <= tp_list[0])
-                            )
-
-                            if tp1_hit:
-                                pos["tp1_hit"] = True
-                                old_qty = actual_qty
-                                precision = self._get_qty_precision(symbol)
-                                new_qty = round(actual_qty * 0.5, precision)
-                                pos["qty"] = new_qty
-
-                                logger.info(
-                                    "TP1 partial close for paper trade #%d: qty %.6f -> %.6f",
-                                    trade.id, old_qty, new_qty,
-                                )
-
-                                # 計算 TP1 已實現利潤
-                                tp1_price = tp_list[0]
-                                leverage = trade.leverage or self.leverage_map.get(symbol, self.default_leverage)
-                                if trade.direction == "LONG":
-                                    tp1_pct = (tp1_price - trade.entry_price) / trade.entry_price * 100
-                                else:
-                                    tp1_pct = (trade.entry_price - tp1_price) / trade.entry_price * 100
-                                tp1_pct *= leverage
-                                tp1_fee = self.calc_fee_pct(leverage)
-                                tp1_pct -= tp1_fee
-                                half_margin = self._get_virtual_balance() * (trade.position_size or 0) / 100 / 2
-                                tp1_profit_usd = round(half_margin * tp1_pct / 100, 4)
-
-                                logger.info(
-                                    "TP1 realized profit for trade #%d: %.2f%% on margin $%.2f = $%.4f",
-                                    trade.id, tp1_pct, half_margin, tp1_profit_usd,
-                                )
-
-                                # 更新 DB：記錄 TP1 利潤、倉位減半
-                                self.db.update_trade(
-                                    trade.id,
-                                    status="PARTIAL_CLOSE",
-                                    profit_usd=tp1_profit_usd,
-                                    position_size=trade.position_size / 2,
-                                )
-
-                                # 移動 SL 到保本價
-                                old_sl = trade.stop_loss
-                                fee_rate = (self.taker_rate + self.taker_rate
-                                            + self.slippage * 2)
-                                if trade.direction == "LONG":
-                                    breakeven_price = trade.entry_price * (1 + fee_rate)
-                                else:
-                                    breakeven_price = trade.entry_price * (1 - fee_rate)
-                                breakeven_price = round(breakeven_price, 2)
-                                self.db.update_trade(trade.id, stop_loss=breakeven_price)
-
-                                logger.info(
-                                    "Breakeven SL for paper trade #%d: %.2f -> %.2f "
-                                    "(entry=%.2f + fee=%.4f%%)",
-                                    trade.id, old_sl or 0, breakeven_price,
-                                    trade.entry_price, fee_rate * 100,
-                                )
-
-                                if callback:
-                                    await callback("tp1_hit", trade, {
-                                        "current_price": current_price,
-                                        "tp1_price": tp_list[0],
-                                        "closed_qty": old_qty - new_qty,
-                                        "remaining_qty": new_qty,
-                                        "breakeven_sl": breakeven_price,
-                                        "old_sl": old_sl,
-                                    })
-
-                                # 重新讀取 trade（SL 已更新）
-                                trade = self.db.get_trade(trade.id)
-
-                        # ── Case B: TP2 檢查（價格觸及第二目標） ──
-                        if pos["tp1_hit"] and len(tp_list) >= 2 and actual_qty > 0:
-                            tp2_hit = (
-                                (trade.direction == "LONG" and current_price >= tp_list[1]) or
-                                (trade.direction == "SHORT" and current_price <= tp_list[1])
-                            )
-
-                            if tp2_hit:
-                                logger.info(
-                                    "TP2 hit for paper trade #%d, closing position",
-                                    trade.id,
-                                )
-                                result = self.close_trade(trade.id, current_price)
-                                if callback:
-                                    await callback("take_profit", trade, result)
-                                _pos_state.pop(trade.id, None)
-                                continue
-
-                        # 單目標 TP 檢查
-                        if (not pos["tp1_hit"]
-                                and len(tp_list) == 1
-                                and actual_qty > 0):
+                        if n_tps > 0 and tp_idx < n_tps and actual_qty > 0:
+                            tp_price = tp_list[tp_idx]
+                            is_last_tp = (tp_idx == n_tps - 1)
                             tp_hit = (
-                                (trade.direction == "LONG" and current_price >= tp_list[0]) or
-                                (trade.direction == "SHORT" and current_price <= tp_list[0])
+                                (trade.direction == "LONG" and current_price >= tp_price) or
+                                (trade.direction == "SHORT" and current_price <= tp_price)
                             )
+
                             if tp_hit:
-                                logger.info(
-                                    "TP hit for paper trade #%d, closing position",
-                                    trade.id,
-                                )
-                                result = self.close_trade(trade.id, current_price)
-                                if callback:
-                                    await callback("take_profit", trade, result)
-                                _pos_state.pop(trade.id, None)
-                                continue
+                                if is_last_tp:
+                                    # 最後一個 TP：全數平倉
+                                    logger.info(
+                                        "TP%d (final) hit for paper trade #%d, closing",
+                                        tp_idx + 1, trade.id,
+                                    )
+                                    result = self.close_trade(trade.id, current_price)
+                                    if callback:
+                                        await callback("take_profit", trade, result)
+                                    _pos_state.pop(trade.id, None)
+                                    continue
+                                else:
+                                    # 中間 TP：部分平倉
+                                    # 剩餘段數（含本次），本次平掉 1/remaining_tps
+                                    remaining_tps = n_tps - tp_idx
+                                    precision = self._get_qty_precision(symbol)
+                                    old_qty = actual_qty
+                                    close_qty = round(actual_qty / remaining_tps, precision)
+                                    close_qty = min(close_qty, actual_qty)
+                                    new_qty = max(round(actual_qty - close_qty, precision), 0)
+                                    pos["qty"] = new_qty
+                                    pos["tp_idx"] = tp_idx + 1
+
+                                    # 計算本段已實現利潤
+                                    leverage = trade.leverage or self.leverage_map.get(symbol, self.default_leverage)
+                                    if trade.direction == "LONG":
+                                        seg_pct = (tp_price - trade.entry_price) / trade.entry_price * 100
+                                    else:
+                                        seg_pct = (trade.entry_price - tp_price) / trade.entry_price * 100
+                                    seg_pct *= leverage
+                                    seg_pct -= self.calc_fee_pct(leverage)
+
+                                    close_ratio = close_qty / old_qty if old_qty > 0 else 0
+                                    seg_margin = self._get_virtual_balance() * (trade.position_size or 0) / 100 * close_ratio
+                                    seg_profit_usd = round(seg_margin * seg_pct / 100, 4)
+
+                                    # 累計已實現利潤、縮減剩餘倉位大小
+                                    new_profit_usd = (trade.profit_usd or 0) + seg_profit_usd
+                                    new_position_size = round((trade.position_size or 0) * (1 - close_ratio), 4)
+
+                                    update_fields: dict = {
+                                        "status": "PARTIAL_CLOSE",
+                                        "profit_usd": new_profit_usd,
+                                        "position_size": new_position_size,
+                                    }
+
+                                    # TP1 專屬：移動止損到保本價
+                                    old_sl = trade.stop_loss
+                                    breakeven_price = None
+                                    if tp_idx == 0:
+                                        fee_rate = self.taker_rate + self.taker_rate + self.slippage * 2
+                                        if trade.direction == "LONG":
+                                            breakeven_price = round(trade.entry_price * (1 + fee_rate), 2)
+                                        else:
+                                            breakeven_price = round(trade.entry_price * (1 - fee_rate), 2)
+                                        update_fields["stop_loss"] = breakeven_price
+                                        logger.info(
+                                            "TP1 breakeven SL for trade #%d: %.2f -> %.2f",
+                                            trade.id, old_sl or 0, breakeven_price,
+                                        )
+
+                                    self.db.update_trade(trade.id, **update_fields)
+
+                                    logger.info(
+                                        "TP%d partial close for trade #%d: qty %.6f -> %.6f "
+                                        "(seg_profit=$%.4f, total_profit=$%.4f)",
+                                        tp_idx + 1, trade.id, old_qty, new_qty,
+                                        seg_profit_usd, new_profit_usd,
+                                    )
+
+                                    if callback:
+                                        await callback("tp1_hit", trade, {
+                                            "current_price": current_price,
+                                            "tp1_price": tp_price,
+                                            "tp_index": tp_idx,
+                                            "closed_qty": close_qty,
+                                            "remaining_qty": new_qty,
+                                            "breakeven_sl": breakeven_price,
+                                            "old_sl": old_sl,
+                                        })
+
+                                    # 重新讀取 trade（DB 已更新）
+                                    trade = self.db.get_trade(trade.id)
 
                         # ── Case C: 計算未實現盈虧 ──
                         leverage = trade.leverage or self.leverage_map.get(symbol, self.default_leverage)

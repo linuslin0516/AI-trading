@@ -253,7 +253,7 @@ SIGNAL_PARSER_PROMPT = """你是一個加密貨幣跟單系統的訊號解析器
       "entry_1": {{"price": 數字, "strategy": "LIMIT" | "MARKET"}},
       "entry_2": {{"price": 數字, "strategy": "LIMIT"}} | null,
       "stop_loss": 數字 | null,
-      "take_profit": [tp1] | [tp1, tp2] | null,
+      "take_profit": [tp1] | [tp1, tp2] | [tp1, tp2, tp3] | null,
       "skip_reason": "只在 SKIP 時填寫原因，其他填 null"
     }}
   ]
