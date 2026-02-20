@@ -320,10 +320,9 @@ class TradingBot:
                             if t.symbol == symbol and t.direction == direction]
                 if len(same_dir) >= 2:
                     avg_cost = round(sum(t.entry_price for t in same_dir) / len(same_dir), 2)
-                    await self.telegram.bot.send_message(
-                        chat_id=self.telegram.chat_id,
-                        text=(f"📊 加倉成交 {symbol} {direction}\n"
-                              f"持倉數: {len(same_dir)} 倉 | 平均成本: {avg_cost}"),
+                    await self.telegram._safe_send(
+                        f"📊 加倉成交 {symbol} {direction}\n"
+                        f"持倉數: {len(same_dir)} 倉 | 平均成本: {avg_cost}"
                     )
             except Exception:
                 pass
@@ -361,9 +360,7 @@ class TradingBot:
                 f"{next_hint}"
             )
             try:
-                await self.telegram.bot.send_message(
-                    chat_id=self.telegram.chat_id, text=text,
-                )
+                await self.telegram._safe_send(text)
             except Exception as e:
                 logger.warning("Failed to send %s notification: %s", tp_label, e)
             return
@@ -386,9 +383,7 @@ class TradingBot:
                     f"請檢查槓桿倍數和保證金是否足夠。"
                 )
                 try:
-                    await self.telegram.bot.send_message(
-                        chat_id=self.telegram.chat_id, text=liq_text,
-                    )
+                    await self.telegram._safe_send(liq_text)
                 except Exception as e:
                     logger.error("Failed to send liquidation alert: %s", e)
 
@@ -403,9 +398,7 @@ class TradingBot:
                     f"請至 Binance 確認。"
                 )
                 try:
-                    await self.telegram.bot.send_message(
-                        chat_id=self.telegram.chat_id, text=unk_text,
-                    )
+                    await self.telegram._safe_send(unk_text)
                 except Exception as e:
                     logger.error("Failed to send unknown close alert: %s", e)
 
@@ -433,10 +426,7 @@ class TradingBot:
         if not to_close:
             logger.info("Follow CLOSE: no open position for %s", symbol)
             try:
-                await self.telegram.bot.send_message(
-                    chat_id=self.telegram.chat_id,
-                    text=f"⚠️ 分析師指示平倉 {symbol}，但目前沒有持倉",
-                )
+                await self.telegram._safe_send(f"⚠️ 分析師指示平倉 {symbol}，但目前沒有持倉")
             except Exception:
                 pass
             return
@@ -480,9 +470,7 @@ class TradingBot:
                 f"加倉點: {entry_2_price}{avg_text}\n"
                 f"止損: {addon['stop_loss']} | 止盈: {addon['take_profit']}"
             )
-            await self.telegram.bot.send_message(
-                chat_id=self.telegram.chat_id, text=text,
-            )
+            await self.telegram._safe_send(text)
         except Exception as e:
             logger.error("Addon entry error: %s", e)
 

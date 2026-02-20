@@ -93,6 +93,24 @@ class TelegramNotifier:
             await self._app.stop()
             await self._app.shutdown()
 
+    # ── 工具方法 ──
+
+    def _sync_send(self, text: str) -> None:
+        """同步發送訊息（OS-level timeout），避免 asyncio/httpx 掛住"""
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
+                json={"chat_id": self.chat_id, "text": text},
+                timeout=15,
+            )
+        except Exception as e:
+            logger.warning("_sync_send failed: %s", e)
+
+    async def _safe_send(self, text: str) -> None:
+        """非同步包裝：在 executor 執行 _sync_send，不阻塞 event loop"""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._sync_send, text)
+
     # ── 通知方法 ──
 
     async def send_signal(self, decision: dict, countdown: int = 30) -> dict:
@@ -191,7 +209,7 @@ class TelegramNotifier:
             json={"chat_id": self.chat_id, "text": text, "reply_markup": keyboard_dict},
             timeout=15,
         )
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             resp = await asyncio.wait_for(
                 loop.run_in_executor(None, _send_fn),
@@ -283,7 +301,7 @@ class TelegramNotifier:
             f"目標: {', '.join(format_price(t) for t in trade_result['take_profit'])}\n\n"
             f"📊 持倉監控中..."
         )
-        await self.bot.send_message(chat_id=self.chat_id, text=text)
+        await self._safe_send(text)
 
     async def send_pending_order(self, trade_result: dict):
         """LIMIT 掛單通知（等待成交）"""
@@ -299,7 +317,7 @@ class TelegramNotifier:
             f"目標: {', '.join(format_price(t) for t in trade_result['take_profit'])}\n\n"
             f"⏳ LIMIT 限價單，等待市場價觸及掛單價..."
         )
-        await self.bot.send_message(chat_id=self.chat_id, text=text)
+        await self._safe_send(text)
 
     async def send_position_update(self, trade, current_price: float, unrealized_pct: float):
         """持倉更新（可選，避免太頻繁）"""
@@ -357,7 +375,7 @@ class TelegramNotifier:
 
             text += f"整體評分: {review.get('overall_score', 'N/A')}/10\n"
 
-        await self.bot.send_message(chat_id=self.chat_id, text=text)
+        await self._safe_send(text)
 
     async def send_daily_summary(self, stats: dict):
         """每日總結"""
@@ -374,7 +392,7 @@ class TelegramNotifier:
             f"總盈虧: {format_pct(stats.get('total_profit_pct', 0))}\n"
             f"最大回撤: {format_pct(stats.get('max_drawdown', 0))}\n"
         )
-        await self.bot.send_message(chat_id=self.chat_id, text=text)
+        await self._safe_send(text)
 
     async def send_morning_briefing(self, briefing: dict):
         """每日早報（8:00 AM）"""
@@ -428,7 +446,7 @@ class TelegramNotifier:
             f"信心水平: {confidence}\n"
         )
 
-        await self.bot.send_message(chat_id=self.chat_id, text=text)
+        await self._safe_send(text)
 
     async def send_evening_summary(self, summary: dict, stats: dict):
         """每日晚報（10:00 PM）"""
@@ -492,7 +510,7 @@ class TelegramNotifier:
             f"今日評分: {score}/10\n"
         )
 
-        await self.bot.send_message(chat_id=self.chat_id, text=text)
+        await self._safe_send(text)
 
     async def send_learning_event(self, event: dict):
         """AI 學習事件通知"""
@@ -504,7 +522,7 @@ class TelegramNotifier:
             f"類型: {event.get('type', 'N/A')}\n"
             f"內容: {event.get('description', 'N/A')}\n"
         )
-        await self.bot.send_message(chat_id=self.chat_id, text=text)
+        await self._safe_send(text)
 
     async def send_rejected_signal(self, decision: dict):
         """被風控拒絕的訊號"""
@@ -514,15 +532,12 @@ class TelegramNotifier:
             f"信心: {decision.get('confidence', 0)}%\n\n"
             f"風控結果:\n{decision.get('_risk_summary', 'N/A')}\n"
         )
-        await self.bot.send_message(chat_id=self.chat_id, text=text)
+        await self._safe_send(text)
 
     async def send_error(self, error_msg: str):
         """錯誤通知"""
         text = f"🚨 系統錯誤\n\n{error_msg}"
-        try:
-            await self.bot.send_message(chat_id=self.chat_id, text=text)
-        except Exception:
-            logger.error("Failed to send error notification")
+        await self._safe_send(text)
 
     # ── 取消原因 ──
 
@@ -539,15 +554,40 @@ class TelegramNotifier:
             ],
         ])
 
-        msg = await self.bot.send_message(
-            chat_id=self.chat_id,
-            text="❌ 交易已取消\n\n請問取消原因：",
-            reply_markup=keyboard,
-        )
+        keyboard_dict = {
+            "inline_keyboard": [
+                [
+                    {"text": "方向不對", "callback_data": "cr_direction"},
+                    {"text": "信心不足", "callback_data": "cr_confidence"},
+                ],
+                [
+                    {"text": "等待更好時機", "callback_data": "cr_timing"},
+                    {"text": "✏️ 自行輸入", "callback_data": "cr_custom"},
+                ],
+            ]
+        }
+        loop = asyncio.get_running_loop()
+        try:
+            resp = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    requests.post,
+                    f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
+                    json={
+                        "chat_id": self.chat_id,
+                        "text": "❌ 交易已取消\n\n請問取消原因：",
+                        "reply_markup": keyboard_dict,
+                    },
+                    timeout=15,
+                ),
+            )
+            cr_msg_id = str(resp.json()["result"]["message_id"])
+        except Exception as e:
+            logger.warning("_ask_cancel_reason send failed: %s", e)
+            return "未說明"
 
-        msg_id = str(msg.message_id)
         reason_event = asyncio.Event()
-        self._cancel_reasons[msg_id] = {
+        self._cancel_reasons[cr_msg_id] = {
             "event": reason_event,
             "reason": "",
             "waiting_text": False,
@@ -555,16 +595,24 @@ class TelegramNotifier:
 
         try:
             await asyncio.wait_for(reason_event.wait(), timeout=60)
-            reason = self._cancel_reasons[msg_id]["reason"]
+            reason = self._cancel_reasons[cr_msg_id]["reason"]
         except asyncio.TimeoutError:
             reason = "未說明"
 
-        self._cancel_reasons.pop(msg_id, None)
+        self._cancel_reasons.pop(cr_msg_id, None)
 
-        await self.bot.edit_message_text(
-            chat_id=self.chat_id,
-            message_id=msg.message_id,
-            text=f"❌ 交易已取消\n原因：{reason}",
+        await loop.run_in_executor(
+            None,
+            functools.partial(
+                requests.post,
+                f"https://api.telegram.org/bot{self.bot_token}/editMessageText",
+                json={
+                    "chat_id": self.chat_id,
+                    "message_id": int(cr_msg_id),
+                    "text": f"❌ 交易已取消\n原因：{reason}",
+                },
+                timeout=10,
+            ),
         )
 
         logger.info("Cancel reason: %s", reason)
@@ -619,10 +667,7 @@ class TelegramNotifier:
                 self._cancel_reasons[msg_id]["reason"] = preset_reasons[query.data]
                 self._cancel_reasons[msg_id]["event"].set()
             elif query.data == "cr_custom":
-                await self.bot.send_message(
-                    chat_id=self.chat_id,
-                    text="請輸入您的取消原因：",
-                )
+                await self._safe_send("請輸入您的取消原因：")
                 self._cancel_reasons[msg_id]["waiting_text"] = True
             return
 
@@ -725,16 +770,13 @@ class TelegramNotifier:
                 # 發送進場通知
                 await self.send_entry_confirmation(trade_result)
 
-                await self.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=(
-                        f"✅ 測試交易成功！\n\n"
-                        f"交易 #{trade_result['trade_id']}\n"
-                        f"LONG BTCUSDT @ {format_price(price)}\n"
-                        f"數量: {trade_result['quantity']}\n\n"
-                        f"使用 /positions 查看持倉\n"
-                        f"使用 /pnl 查看績效"
-                    ),
+                await self._safe_send(
+                    f"✅ 測試交易成功！\n\n"
+                    f"交易 #{trade_result['trade_id']}\n"
+                    f"LONG BTCUSDT @ {format_price(price)}\n"
+                    f"數量: {trade_result['quantity']}\n\n"
+                    f"使用 /positions 查看持倉\n"
+                    f"使用 /pnl 查看績效"
                 )
             else:
                 await update.message.reply_text(
