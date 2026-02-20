@@ -622,8 +622,9 @@ class TelegramNotifier:
 
     async def _button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        msg_id = str(query.message.message_id)
 
-        # 持倉刷新按鈕
+        # 持倉刷新按鈕（不在交易流程中，保持原邏輯）
         if query.data == "refresh_positions":
             try:
                 await query.answer("刷新中...")
@@ -639,14 +640,8 @@ class TelegramNotifier:
                 logger.warning("Failed to refresh positions: %s", e)
             return
 
-        try:
-            await query.answer()
-        except Exception:
-            pass  # query 可能已過期，忽略
-
-        msg_id = str(query.message.message_id)
-
-        # 交易確認按鈕
+        # ── STEP 1: 立即設定 event（純 Python，無 I/O，不能被 httpx 阻塞）──
+        # 必須在 query.answer() 之前，否則 httpx 卡住會讓 event 永遠不被設定
         if msg_id in self._cancel_callbacks:
             if query.data == "cancel":
                 self._cancel_callbacks[msg_id].set()
@@ -654,9 +649,8 @@ class TelegramNotifier:
                 if msg_id in self._pending_decisions:
                     self._pending_decisions[msg_id]["_execute_now"] = True
                 self._cancel_callbacks[msg_id].set()
-            return
 
-        # 取消原因按鈕
+        # 取消原因按鈕（event 設定也在 I/O 之前）
         if msg_id in self._cancel_reasons:
             preset_reasons = {
                 "cr_direction": "方向不對",
@@ -666,10 +660,24 @@ class TelegramNotifier:
             if query.data in preset_reasons:
                 self._cancel_reasons[msg_id]["reason"] = preset_reasons[query.data]
                 self._cancel_reasons[msg_id]["event"].set()
-            elif query.data == "cr_custom":
-                await self._safe_send("請輸入您的取消原因：")
-                self._cancel_reasons[msg_id]["waiting_text"] = True
-            return
+
+        # ── STEP 2: 回應 TG callback query（fire-and-forget，不 await）──
+        # 用 requests + executor，避免 asyncio.wait_for + httpx 卡住
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(
+            None,
+            functools.partial(
+                requests.post,
+                f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery",
+                json={"callback_query_id": query.id},
+                timeout=5,
+            ),
+        )
+
+        # cr_custom 需要等用戶輸入，在 event 設定後才處理
+        if msg_id in self._cancel_reasons and query.data == "cr_custom":
+            await self._safe_send("請輸入您的取消原因：")
+            self._cancel_reasons[msg_id]["waiting_text"] = True
 
     async def _text_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """接收用戶輸入的文字（用於自行輸入取消原因）"""
