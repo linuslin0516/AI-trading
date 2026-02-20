@@ -237,38 +237,32 @@ class TelegramNotifier:
         self._pending_decisions.pop(msg_id, None)
         self._cancel_callbacks.pop(msg_id, None)
 
-        if cancelled:
+        def _edit_message(new_text: str):
+            """同步 edit，用 requests 避免 asyncio.wait_for + httpx 卡住問題"""
             try:
-                await asyncio.wait_for(
-                    self.bot.edit_message_text(
-                        chat_id=self.chat_id,
-                        message_id=msg_message_id,
-                        text=text.replace(
-                            f"⏱️ {countdown} 秒後自動執行...",
-                            f"❌ 已取消\n原因：{cancel_reason}"
-                        ),
-                    ),
+                requests.post(
+                    f"https://api.telegram.org/bot{self.bot_token}/editMessageText",
+                    json={
+                        "chat_id": self.chat_id,
+                        "message_id": msg_message_id,
+                        "text": new_text,
+                    },
                     timeout=10,
                 )
             except Exception:
                 pass
+
+        if cancelled:
+            cancelled_text = text.replace(
+                f"⏱️ {countdown} 秒後自動執行...",
+                f"❌ 已取消\n原因：{cancel_reason}"
+            )
+            await loop.run_in_executor(None, _edit_message, cancelled_text)
             return {"executed": False, "cancelled": True, "cancel_reason": cancel_reason}
 
         status_text = "⚡ 立即執行中..." if execute_now else "✅ 倒數結束，執行中..."
-        try:
-            await asyncio.wait_for(
-                self.bot.edit_message_text(
-                    chat_id=self.chat_id,
-                    message_id=msg_message_id,
-                    text=text.replace(
-                        f"⏱️ {countdown} 秒後自動執行...",
-                        status_text,
-                    ),
-                ),
-                timeout=10,
-            )
-        except Exception:
-            pass
+        executing_text = text.replace(f"⏱️ {countdown} 秒後自動執行...", status_text)
+        await loop.run_in_executor(None, _edit_message, executing_text)
 
         return {"executed": True, "cancelled": False}
 
