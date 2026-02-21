@@ -6,6 +6,7 @@ DC Trading Bot — 跟單模式 (Follow Mode Only)
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from modules.ai_analyzer import AIAnalyzer
 from modules.database import Database
@@ -44,6 +45,8 @@ class TradingBot:
         logger.info("Starting services...")
 
         await self.telegram.start()
+        self.telegram._signal_callback = self._on_manual_signal
+        self.telegram._replay_callback = self._replay_signals
         logger.info("Telegram started")
 
         await self.price_feed.start()
@@ -286,6 +289,60 @@ class TradingBot:
             if ch["analyst"] in analyst_names:
                 return ch.get("leverage", 100)
         return self.config.get("trading", {}).get("default_leverage", 100)
+
+    # ── 重播 / 手動跟單 ──
+
+    async def _replay_signals(self, hours: float):
+        """撈過去 N 小時的 DB 訊息，重新跑 AI 解析 + 執行"""
+        from datetime import timedelta, timezone
+        from modules.discord_listener import AnalystMessage as DiscordMsg
+
+        db_msgs = self.db.get_recent_analyst_messages(hours=int(hours) + 1)
+
+        # 篩選精確時間範圍
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        filtered = [
+            m for m in db_msgs
+            if m.timestamp and m.timestamp.replace(tzinfo=timezone.utc) >= cutoff
+        ]
+
+        if not filtered:
+            await self.telegram._safe_send(
+                f"⚠️ 過去 {hours} 小時沒有分析師訊息記錄（DB 是空的或剛重建）"
+            )
+            return
+
+        analysts = ", ".join(sorted({m.analyst_name for m in filtered}))
+        await self.telegram._safe_send(
+            f"🔄 找到 {len(filtered)} 則訊息（{analysts}），開始重新解析..."
+        )
+        logger.info("Replay: %d messages from last %.1fh (%s)", len(filtered), hours, analysts)
+
+        # 轉成 discord_listener.AnalystMessage 格式
+        discord_msgs = [
+            DiscordMsg(
+                analyst=m.analyst_name,
+                channel_id="replay",
+                channel_name=m.channel or m.analyst_name,
+                content=m.content,
+                timestamp=m.timestamp.replace(tzinfo=timezone.utc),
+                weight=1.0,
+                images=[],  # 圖片 base64 不存 DB，replay 時略過
+            )
+            for m in filtered
+        ]
+
+        # 直接送進訊號處理（跳過 60 秒收集窗口）
+        await self._on_signals_received(discord_msgs)
+
+    async def _on_manual_signal(self, decision: dict):
+        """處理 /follow 手動輸入的訊號"""
+        entry_2 = decision.pop("_entry_2", None)
+        await self._execute_trade(decision, analyst_names=["手動跟單"], messages=[])
+        if entry_2:
+            addon = {**decision, "entry": entry_2,
+                     "position_size": decision["position_size"]}
+            await self._execute_addon(addon)
 
 
 def main():

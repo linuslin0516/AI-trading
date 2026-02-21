@@ -46,6 +46,8 @@ class TelegramNotifier:
         self._cancel_reasons: dict[str, dict] = {}  # msg_id -> {event, reason, waiting_text}
         self._briefing_callback = None  # main.py 設定
         self._review_callback = None    # main.py 設定
+        self._signal_callback = None    # main.py 設定（手動跟單）
+        self._replay_callback = None    # main.py 設定（重播歷史訊號）
 
         logger.info("TelegramNotifier initialized")
 
@@ -63,6 +65,8 @@ class TelegramNotifier:
         self._app.add_handler(CommandHandler("help", self._cmd_help))
         self._app.add_handler(CommandHandler("test_trade", self._cmd_test_trade))
         self._app.add_handler(CommandHandler("test_signal", self._cmd_test_signal))
+        self._app.add_handler(CommandHandler("follow", self._cmd_follow))
+        self._app.add_handler(CommandHandler("replay", self._cmd_replay))
         self._app.add_handler(CommandHandler("positions", self._cmd_positions))
         self._app.add_handler(CommandHandler("pnl", self._cmd_pnl))
         self._app.add_handler(CommandHandler("close", self._cmd_close))
@@ -867,6 +871,147 @@ class TelegramNotifier:
         except Exception as e:
             logger.exception("Test signal error")
             await update.message.reply_text(f"❌ 測試流程錯誤: {e}")
+
+    async def _cmd_follow(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """手動跟單指令：直接輸入分析師點位執行交易
+
+        格式：/follow {LONG|SHORT} {BTC|ETH} {entry1[,entry2]} {sl} {tp1[,tp2,tp3]}
+
+        範例（空單，兩個進場點，三個止盈）：
+          /follow SHORT BTC 67800,68600 69300 67000,66300,65600
+
+        範例（多單，單一進場點，兩個止盈）：
+          /follow LONG BTC 95000 93000 97000,99000
+        """
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._signal_callback:
+            await update.message.reply_text("❌ 訊號回調未初始化")
+            return
+
+        args = context.args
+        if len(args) < 5:
+            await update.message.reply_text(
+                "❌ 格式錯誤\n\n"
+                "正確格式：\n"
+                "/follow {LONG|SHORT} {BTC|ETH} {進場點} {止損} {止盈點}\n\n"
+                "範例：\n"
+                "/follow SHORT BTC 67800,68600 69300 67000,66300,65600\n"
+                "/follow LONG BTC 95000 93000 97000,99000"
+            )
+            return
+
+        try:
+            action = args[0].upper()
+            if action not in ("LONG", "SHORT"):
+                await update.message.reply_text("❌ 方向必須是 LONG 或 SHORT")
+                return
+
+            # 幣種解析
+            sym_raw = args[1].upper()
+            symbol_map = {
+                "BTC": "BTCUSDT", "BTCUSDT": "BTCUSDT",
+                "ETH": "ETHUSDT", "ETHUSDT": "ETHUSDT",
+            }
+            symbol = symbol_map.get(sym_raw)
+            if not symbol:
+                await update.message.reply_text(f"❌ 不支援幣種：{sym_raw}（只支援 BTC / ETH）")
+                return
+
+            # 進場點（逗號分隔，可多個）
+            entries_raw = [float(x) for x in args[2].split(",") if x]
+            entry_1_price = entries_raw[0]
+            entry_2_price = entries_raw[1] if len(entries_raw) > 1 else None
+
+            # 止損
+            stop_loss = float(args[3])
+
+            # 止盈點（逗號分隔，可多個）
+            tp_raw = args[4].split(",") if "," in args[4] else args[4:]
+            take_profit = [float(x) for x in tp_raw if x]
+
+            if not take_profit:
+                await update.message.reply_text("❌ 至少需要一個止盈點")
+                return
+
+        except (ValueError, IndexError) as e:
+            await update.message.reply_text(f"❌ 解析失敗：{e}\n請確認所有數字格式正確")
+            return
+
+        # 從 config 取倉位和槓桿
+        trading_cfg = self.config.get("trading", {})
+        follow_pos = trading_cfg.get("follow_position_size", 5.0)
+        channels = self.config.get("discord", {}).get("monitored_channels", [])
+        leverage = channels[0].get("leverage", 100) if channels else 100
+
+        has_entry_2 = entry_2_price is not None
+        pos_size = round(follow_pos / 2, 1) if has_entry_2 else follow_pos
+
+        decision = {
+            "action": action,
+            "symbol": symbol,
+            "confidence": 90,
+            "leverage": leverage,
+            "entry": {"price": entry_1_price, "strategy": "LIMIT"},
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "position_size": pos_size,
+            "risk_reward": 2.0,
+            "reasoning": {
+                "analyst_consensus": "手動跟單",
+                "technical": "用戶手動輸入點位",
+                "sentiment": "N/A",
+            },
+            "risk_assessment": {},
+            "_follow_mode": True,
+            "_analyst_messages": [],
+            "_entry_2": {"price": entry_2_price, "strategy": "LIMIT"} if has_entry_2 else None,
+        }
+
+        preview = (
+            f"📋 手動跟單確認\n\n"
+            f"{'🟢 LONG (做多)' if action == 'LONG' else '🔴 SHORT (做空)'}\n"
+            f"交易對: {symbol}\n"
+            f"進場 1: {entry_1_price} (LIMIT)\n"
+        )
+        if has_entry_2:
+            preview += f"進場 2: {entry_2_price} (LIMIT)\n"
+        preview += (
+            f"止損: {stop_loss}\n"
+            f"止盈: {', '.join(str(t) for t in take_profit)}\n"
+            f"倉位: {pos_size}% × {leverage}x\n"
+        )
+        await update.message.reply_text(preview)
+
+        await self._signal_callback(decision)
+
+    async def _cmd_replay(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """重播過去 N 小時的分析師訊號，重新跑 AI 解析 + 執行交易
+
+        格式：/replay [小時數]
+        範例：/replay 2   （預設 2 小時）
+        """
+        if str(update.effective_chat.id) != str(self.chat_id):
+            return
+
+        if not self._replay_callback:
+            await update.message.reply_text("❌ replay 回調未初始化")
+            return
+
+        hours = 2.0
+        if context.args:
+            try:
+                hours = float(context.args[0])
+            except ValueError:
+                await update.message.reply_text("❌ 格式：/replay [小時數]，例如 /replay 2")
+                return
+
+        await update.message.reply_text(
+            f"🔄 掃描過去 {hours} 小時的分析師訊息，重新解析並執行...\n"
+            f"（跳過 60 秒收集窗口，直接送 AI 分析）"
+        )
+        await self._replay_callback(hours)
 
     def _build_positions_text(self) -> str:
         """產生持倉資訊文字（供 /positions 和刷新按鈕共用）"""
