@@ -199,34 +199,52 @@ class TelegramNotifier:
 
         logger.info("Sending trade signal to Telegram (chat_id=%s)...", self.chat_id)
 
-        # 使用 requests（同步 + OS-level timeout）跑在 executor，
-        # 避免 asyncio.wait_for 在 Python 3.11 + httpx 無法可靠取消的問題
+        # ── Python 3.11 asyncio.wait_for + run_in_executor 卡死 bug 的正確解法 ──
+        # 問題：asyncio.wait_for 超時後進入 _cancel_and_wait()，
+        #       但 run_in_executor 的 Future 取消失敗（thread 不能被強制終止），
+        #       導致 _cancel_and_wait 永遠等不到 future 完成 → 整個 coroutine 卡死。
+        #
+        # 解法：用 asyncio.Event 作為橋接。
+        #   thread 完成後用 loop.call_soon_threadsafe(event.set) 通知 event loop。
+        #   asyncio.wait_for(event.wait(), timeout=N) 只取消純 asyncio 的 Event.wait()，
+        #   這個取消永遠正常運作，不會卡在 _cancel_and_wait。
         keyboard_dict = {
             "inline_keyboard": [[
                 {"text": "❌ 取消", "callback_data": "cancel"},
                 {"text": "⚡ 立即執行", "callback_data": "execute_now"},
             ]]
         }
-        _send_fn = functools.partial(
-            requests.post,
-            f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
-            json={"chat_id": self.chat_id, "text": text, "reply_markup": keyboard_dict},
-            timeout=15,
-        )
         loop = asyncio.get_running_loop()
+        _send_done = asyncio.Event()
+        _send_result: dict = {}
+
+        def _send_blocking():
+            try:
+                resp = requests.post(
+                    f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
+                    json={"chat_id": self.chat_id, "text": text, "reply_markup": keyboard_dict},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                _send_result["msg_id"] = resp.json()["result"]["message_id"]
+            except Exception as e:
+                _send_result["error"] = str(e)
+            finally:
+                # 從 thread 安全地喚醒 event loop
+                loop.call_soon_threadsafe(_send_done.set)
+
+        loop.run_in_executor(None, _send_blocking)
         try:
-            resp = await asyncio.wait_for(
-                loop.run_in_executor(None, _send_fn),
-                timeout=20,
-            )
-            resp.raise_for_status()
-            msg_message_id = resp.json()["result"]["message_id"]
+            await asyncio.wait_for(_send_done.wait(), timeout=20)
         except asyncio.TimeoutError:
-            logger.error("Telegram send_message timed out (20s executor)")
+            logger.error("Telegram sendMessage timed out (20s) — executing trade without TG confirmation")
             return {"executed": True, "cancelled": False}
-        except Exception as e:
-            logger.error("Telegram send_message failed: %s", e)
+
+        if "error" in _send_result:
+            logger.error("Telegram sendMessage failed: %s", _send_result["error"])
             return {"executed": True, "cancelled": False}
+
+        msg_message_id = _send_result["msg_id"]
 
         logger.info("Signal sent to Telegram (msg_id=%s)", msg_message_id)
 
