@@ -252,6 +252,9 @@ class TelegramNotifier:
                 break
             await asyncio.sleep(min(5, remaining))
 
+        logger.info("Countdown done (msg_id=%s, execute_now=%s, cancelled=%s)",
+                    msg_id, execute_now, cancelled)
+
         if cancelled:
             cancel_reason = await self._ask_cancel_reason()
 
@@ -284,7 +287,9 @@ class TelegramNotifier:
 
         status_text = "⚡ 立即執行中..." if execute_now else "✅ 倒數結束，執行中..."
         executing_text = text.replace(f"⏱️ {countdown} 秒後自動執行...", status_text)
+        logger.info("Editing message to execution status (msg_id=%s)...", msg_id)
         await loop.run_in_executor(None, _edit_message, executing_text)
+        logger.info("Message edited OK, send_signal returning (msg_id=%s)", msg_id)
 
         return {"executed": True, "cancelled": False}
 

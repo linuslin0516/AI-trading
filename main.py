@@ -201,7 +201,18 @@ class TradingBot:
             await self._execute_addon(addon)
 
     async def _execute_trade(self, decision: dict, analyst_names: list, messages: list):
-        trade_result = self.trader.execute_trade(decision)
+        logger.info("_execute_trade START: %s %s entry=%s",
+                    decision.get("action"), decision.get("symbol"),
+                    decision.get("entry", {}).get("price"))
+        try:
+            trade_result = self.trader.execute_trade(decision)
+            logger.info("execute_trade returned: success=%s error=%s",
+                        trade_result.get("success"), trade_result.get("error"))
+        except Exception as e:
+            logger.exception("execute_trade threw exception")
+            await self.telegram.send_error(f"交易執行例外: {e}")
+            return
+
         if trade_result.get("success"):
             self.db.save_ai_decision(
                 decision, outcome="EXECUTED",
@@ -216,10 +227,12 @@ class TradingBot:
                     message=m.content,
                 )
             if trade_result.get("pending"):
+                logger.info("Sending pending order notification...")
                 await self.telegram.send_pending_order(trade_result)
                 logger.info("Trade #%d LIMIT pending @ %s",
                             trade_result["trade_id"], decision["entry"]["price"])
             else:
+                logger.info("Sending entry confirmation notification...")
                 await self.telegram.send_entry_confirmation(trade_result)
                 logger.info("Trade #%d MARKET executed", trade_result["trade_id"])
         else:
