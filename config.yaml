@@ -134,7 +134,7 @@ notifications:
 
 # 數據庫設定
 database:
-  path: "./data/trades_follow.db"
+  path: "./data/trades_v2.db"
   backup_frequency: 86400
 
 # 日誌設定
