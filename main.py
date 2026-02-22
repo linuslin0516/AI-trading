@@ -121,6 +121,16 @@ class TradingBot:
         action = parsed.get("action", "SKIP")
         symbol = parsed.get("symbol", "BTCUSDT")
 
+        # 完整記錄每個 parsed signal，方便除錯
+        logger.info(
+            "Parsed signal: action=%s symbol=%s entry1=%s sl=%s tp=%s skip=%s",
+            action, symbol,
+            parsed.get("entry_1"),
+            parsed.get("stop_loss"),
+            parsed.get("take_profit"),
+            parsed.get("skip_reason"),
+        )
+
         if action == "SKIP":
             logger.info("SKIP [%s]: %s", symbol, parsed.get("skip_reason", ""))
             return
