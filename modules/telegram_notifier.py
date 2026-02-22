@@ -1,9 +1,9 @@
 import asyncio
-import functools
 import json
 import logging
 from datetime import datetime, timezone
 
+import httpx
 import requests
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -99,21 +99,16 @@ class TelegramNotifier:
 
     # ── 工具方法 ──
 
-    def _sync_send(self, text: str) -> None:
-        """同步發送訊息（OS-level timeout），避免 asyncio/httpx 掛住"""
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
-                json={"chat_id": self.chat_id, "text": text},
-                timeout=15,
-            )
-        except Exception as e:
-            logger.warning("_sync_send failed: %s", e)
-
     async def _safe_send(self, text: str) -> None:
-        """非同步包裝：在 executor 執行 _sync_send，不阻塞 event loop"""
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._sync_send, text)
+        """直接用 httpx 非同步發送訊息（DNS timeout 也有效）"""
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                await client.post(
+                    f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
+                    json={"chat_id": self.chat_id, "text": text},
+                )
+        except Exception as e:
+            logger.warning("_safe_send failed: %s", e)
 
     # ── 通知方法 ──
 
@@ -190,61 +185,27 @@ class TelegramNotifier:
             f"⏱️ {countdown} 秒後自動執行...\n"
         )
 
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("❌ 取消", callback_data="cancel"),
-                InlineKeyboardButton("⚡ 立即執行", callback_data="execute_now"),
-            ]
-        ])
-
         logger.info("Sending trade signal to Telegram (chat_id=%s)...", self.chat_id)
 
-        # ── Python 3.11 asyncio.wait_for + run_in_executor 卡死 bug 的正確解法 ──
-        # 問題：asyncio.wait_for 超時後進入 _cancel_and_wait()，
-        #       但 run_in_executor 的 Future 取消失敗（thread 不能被強制終止），
-        #       導致 _cancel_and_wait 永遠等不到 future 完成 → 整個 coroutine 卡死。
-        #
-        # 解法：用 asyncio.Event 作為橋接。
-        #   thread 完成後用 loop.call_soon_threadsafe(event.set) 通知 event loop。
-        #   asyncio.wait_for(event.wait(), timeout=N) 只取消純 asyncio 的 Event.wait()，
-        #   這個取消永遠正常運作，不會卡在 _cancel_and_wait。
         keyboard_dict = {
             "inline_keyboard": [[
                 {"text": "❌ 取消", "callback_data": "cancel"},
                 {"text": "⚡ 立即執行", "callback_data": "execute_now"},
             ]]
         }
-        loop = asyncio.get_running_loop()
-        _send_done = asyncio.Event()
-        _send_result: dict = {}
 
-        def _send_blocking():
-            try:
-                resp = requests.post(
+        # httpx.AsyncClient: timeout 覆蓋 DNS + connect + read，根本解決 DNS 卡住問題
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.post(
                     f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
                     json={"chat_id": self.chat_id, "text": text, "reply_markup": keyboard_dict},
-                    timeout=15,
                 )
                 resp.raise_for_status()
-                _send_result["msg_id"] = resp.json()["result"]["message_id"]
-            except Exception as e:
-                _send_result["error"] = str(e)
-            finally:
-                # 從 thread 安全地喚醒 event loop
-                loop.call_soon_threadsafe(_send_done.set)
-
-        loop.run_in_executor(None, _send_blocking)
-        try:
-            await asyncio.wait_for(_send_done.wait(), timeout=20)
-        except asyncio.TimeoutError:
-            logger.error("Telegram sendMessage timed out (20s) — executing trade without TG confirmation")
+                msg_message_id = resp.json()["result"]["message_id"]
+        except Exception as e:
+            logger.error("Telegram sendMessage failed: %s — executing trade directly", e)
             return {"executed": True, "cancelled": False}
-
-        if "error" in _send_result:
-            logger.error("Telegram sendMessage failed: %s", _send_result["error"])
-            return {"executed": True, "cancelled": False}
-
-        msg_message_id = _send_result["msg_id"]
 
         logger.info("Signal sent to Telegram (msg_id=%s)", msg_message_id)
 
@@ -280,18 +241,17 @@ class TelegramNotifier:
         self._pending_decisions.pop(msg_id, None)
         self._cancel_callbacks.pop(msg_id, None)
 
-        def _edit_message(new_text: str):
-            """同步 edit，用 requests 避免 asyncio.wait_for + httpx 卡住問題"""
+        async def _edit_msg(new_text: str) -> None:
             try:
-                requests.post(
-                    f"https://api.telegram.org/bot{self.bot_token}/editMessageText",
-                    json={
-                        "chat_id": self.chat_id,
-                        "message_id": msg_message_id,
-                        "text": new_text,
-                    },
-                    timeout=10,
-                )
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.post(
+                        f"https://api.telegram.org/bot{self.bot_token}/editMessageText",
+                        json={
+                            "chat_id": self.chat_id,
+                            "message_id": msg_message_id,
+                            "text": new_text,
+                        },
+                    )
             except Exception:
                 pass
 
@@ -300,13 +260,13 @@ class TelegramNotifier:
                 f"⏱️ {countdown} 秒後自動執行...",
                 f"❌ 已取消\n原因：{cancel_reason}"
             )
-            await loop.run_in_executor(None, _edit_message, cancelled_text)
+            await _edit_msg(cancelled_text)
             return {"executed": False, "cancelled": True, "cancel_reason": cancel_reason}
 
         status_text = "⚡ 立即執行中..." if execute_now else "✅ 倒數結束，執行中..."
         executing_text = text.replace(f"⏱️ {countdown} 秒後自動執行...", status_text)
         logger.info("Editing message to execution status (msg_id=%s)...", msg_id)
-        await loop.run_in_executor(None, _edit_message, executing_text)
+        await _edit_msg(executing_text)
         logger.info("Message edited OK, send_signal returning (msg_id=%s)", msg_id)
 
         return {"executed": True, "cancelled": False}
@@ -570,17 +530,6 @@ class TelegramNotifier:
 
     async def _ask_cancel_reason(self) -> str:
         """取消交易後，詢問用戶原因（60 秒等待）"""
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("方向不對", callback_data="cr_direction"),
-                InlineKeyboardButton("信心不足", callback_data="cr_confidence"),
-            ],
-            [
-                InlineKeyboardButton("等待更好時機", callback_data="cr_timing"),
-                InlineKeyboardButton("✏️ 自行輸入", callback_data="cr_custom"),
-            ],
-        ])
-
         keyboard_dict = {
             "inline_keyboard": [
                 [
@@ -593,22 +542,17 @@ class TelegramNotifier:
                 ],
             ]
         }
-        loop = asyncio.get_running_loop()
         try:
-            resp = await loop.run_in_executor(
-                None,
-                functools.partial(
-                    requests.post,
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
                     f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
                     json={
                         "chat_id": self.chat_id,
                         "text": "❌ 交易已取消\n\n請問取消原因：",
                         "reply_markup": keyboard_dict,
                     },
-                    timeout=15,
-                ),
-            )
-            cr_msg_id = str(resp.json()["result"]["message_id"])
+                )
+                cr_msg_id = str(resp.json()["result"]["message_id"])
         except Exception as e:
             logger.warning("_ask_cancel_reason send failed: %s", e)
             return "未說明"
@@ -628,19 +572,18 @@ class TelegramNotifier:
 
         self._cancel_reasons.pop(cr_msg_id, None)
 
-        await loop.run_in_executor(
-            None,
-            functools.partial(
-                requests.post,
-                f"https://api.telegram.org/bot{self.bot_token}/editMessageText",
-                json={
-                    "chat_id": self.chat_id,
-                    "message_id": int(cr_msg_id),
-                    "text": f"❌ 交易已取消\n原因：{reason}",
-                },
-                timeout=10,
-            ),
-        )
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(
+                    f"https://api.telegram.org/bot{self.bot_token}/editMessageText",
+                    json={
+                        "chat_id": self.chat_id,
+                        "message_id": int(cr_msg_id),
+                        "text": f"❌ 交易已取消\n原因：{reason}",
+                    },
+                )
+        except Exception:
+            pass
 
         logger.info("Cancel reason: %s", reason)
         return reason
@@ -689,17 +632,16 @@ class TelegramNotifier:
                 self._cancel_reasons[msg_id]["event"].set()
 
         # ── STEP 2: 回應 TG callback query（fire-and-forget，不 await）──
-        # 用 requests + executor，避免 asyncio.wait_for + httpx 卡住
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(
-            None,
-            functools.partial(
-                requests.post,
-                f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery",
-                json={"callback_query_id": query.id},
-                timeout=5,
-            ),
-        )
+        async def _answer() -> None:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.post(
+                        f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery",
+                        json={"callback_query_id": query.id},
+                    )
+            except Exception:
+                pass
+        asyncio.create_task(_answer())
 
         # cr_custom 需要等用戶輸入，在 event 設定後才處理
         if msg_id in self._cancel_reasons and query.data == "cr_custom":
